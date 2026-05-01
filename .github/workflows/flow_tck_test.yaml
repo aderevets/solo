@@ -17,6 +17,9 @@
 name: "TCK Test (Local CN Build)"
 
 on:
+  push:
+    branches:
+      - tck_test
   workflow_dispatch:
     inputs:
       consensus-node-ref:
