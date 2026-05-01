@@ -123,6 +123,11 @@ on:
         type: string
         required: false
         default: ""
+      cn-artifact-name:
+        description: "GitHub Actions artifact name containing the CN hedera-node/data build (alternative to local-build-path for cross-job sharing):"
+        type: string
+        required: false
+        default: ""
   workflow_call:
     inputs:
       consensus-node-version:
@@ -225,6 +230,11 @@ on:
         type: string
         required: false
         default: ""
+      cn-artifact-name:
+        description: "GitHub Actions artifact name containing the CN hedera-node/data build (alternative to local-build-path for cross-job sharing):"
+        type: string
+        required: false
+        default: ""
 
 defaults:
   run:
@@ -261,6 +271,19 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
+
+      - name: Download CN Build Artifact
+        if: ${{ inputs.cn-artifact-name != '' && !cancelled() && !failure() }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
+        with:
+          name: ${{ inputs.cn-artifact-name }}
+          path: /tmp/cn-hedera-data
+
+      - name: Set SOLO_LOCAL_BUILD_PATH from artifact
+        if: ${{ inputs.cn-artifact-name != '' && !cancelled() && !failure() }}
+        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
+        run: echo "SOLO_LOCAL_BUILD_PATH=/tmp/cn-hedera-data" >> $GITHUB_ENV
 
       - name: Setup Posix Dependencies
         id: set-posix-dependencies

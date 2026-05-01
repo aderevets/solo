@@ -52,15 +52,19 @@ permissions:
 env:
   STEP_TIMEOUT_MINUTES: '5'
   KIND_DOCKER_REGISTRY_MIRRORS: ${{ vars.KIND_DOCKER_REGISTRY_MIRRORS }}
+  CN_ARTIFACT_NAME: cn-hedera-data-${{ github.run_id }}
 
 jobs:
-  test-migration-local-cn-build:
-    name: Migration Test (Local CN Build)
-    timeout-minutes: 120
+  # ── Job 1 ─────────────────────────────────────────────────────────────────
+  # Resolve versions, build the consensus node, and upload hedera-node/data as
+  # an artifact so the two parallel downstream jobs can each download it.
+  setup-and-build:
+    name: Setup and Build CN
+    timeout-minutes: 90
     runs-on: hiero-solo-linux-large
     outputs:
-      local-build-path: ${{ steps.cn-build.outputs.local-build-path }}
       cn-ref: ${{ steps.resolve-cn-ref.outputs.cn-ref }}
+      solo-version: ${{ steps.get-version.outputs.version }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
@@ -71,6 +75,114 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
+
+      - name: Resolve Consensus Node Ref
+        id: resolve-cn-ref
+        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
+        run: |
+          CN_REF="${{ inputs.consensus-node-ref }}"
+          if [[ -z "${CN_REF}" ]]; then
+            echo "No consensus-node-ref provided, fetching latest from builds.hedera.com..."
+            CN_REF=$(bash .github/workflows/script/get_latest_cn_version.sh)
+            echo "Auto-detected CN version: ${CN_REF}"
+          fi
+          echo "cn-ref=${CN_REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Get Solo Release Tag
+        id: get-version
+        uses: step-security/retry@38808b4332b98bb36ca031abff0c100231608288 # v4.0.0
+        with:
+          max_attempts: 3
+          timeout_minutes: 5
+          command: |
+            if [[ -n "${{ inputs.solo-release-tag }}" ]]; then
+              echo "version=${{ inputs.solo-release-tag }}" >> $GITHUB_OUTPUT
+            else
+              LATEST_VERSION=$(curl -s https://registry.npmjs.org/@hashgraph/solo/latest | jq -r '.version')
+              echo "Latest Solo version: ${LATEST_VERSION}"
+              echo "version=${LATEST_VERSION}" >> $GITHUB_OUTPUT
+            fi
+
+      - name: Setup Java
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
+        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
+        with:
+          cache-read-only: false
+
+      - name: Checkout and Build Consensus Node
+        id: cn-build
+        timeout-minutes: 60
+        run: |
+          CN_REF="${{ steps.resolve-cn-ref.outputs.cn-ref }}"
+          CN_REPO_DIR="${GITHUB_WORKSPACE}/../hiero-consensus-node"
+          echo "Cloning hiero-consensus-node at ref: ${CN_REF}"
+
+          git clone https://github.com/hiero-ledger/hiero-consensus-node.git \
+            --depth 1 --branch "${CN_REF}" "${CN_REPO_DIR}" 2>/dev/null || \
+          git clone https://github.com/hiero-ledger/hiero-consensus-node.git \
+            --depth 1 --branch "refs/tags/${CN_REF}" "${CN_REPO_DIR}"
+
+          cd "${CN_REPO_DIR}"
+          echo "Building consensus node..."
+          ./gradlew assemble 2>&1 || {
+            echo "Build failed."
+            exit 1
+          }
+          echo "Consensus node build complete."
+
+      - name: Verify CN Build Artifacts
+        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
+        run: |
+          DATA_DIR="${GITHUB_WORKSPACE}/../hiero-consensus-node/hedera-node/data"
+          if [[ ! -d "${DATA_DIR}" ]]; then
+            echo "ERROR: hedera-node/data not found at ${DATA_DIR}"
+            ls -la "${GITHUB_WORKSPACE}/../hiero-consensus-node/hedera-node/" || true
+            exit 1
+          fi
+          echo "CN build artifacts verified at ${DATA_DIR}"
+          ls -la "${DATA_DIR}/"
+
+      - name: Upload CN Build Artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
+        with:
+          name: ${{ env.CN_ARTIFACT_NAME }}
+          path: ${{ github.workspace }}/../hiero-consensus-node/hedera-node/data
+          retention-days: 1
+          if-no-files-found: error
+
+  # ── Job 2 ─────────────────────────────────────────────────────────────────
+  # Run the migration test using the pre-built CN artifact.
+  migration-test:
+    name: Migration Test
+    timeout-minutes: 120
+    runs-on: hiero-solo-linux-large
+    needs: setup-and-build
+    if: ${{ !cancelled() && needs.setup-and-build.result == 'success' }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
+
+      - name: Download CN Build Artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
+        with:
+          name: ${{ env.CN_ARTIFACT_NAME }}
+          path: /tmp/cn-hedera-data
 
       - name: Setup Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -103,74 +215,10 @@ jobs:
           version: 'v1.27.3'
         id: install
 
-      - name: Setup Java
-        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
-        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
-        with:
-          distribution: temurin
-          java-version: 25
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
-        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
-        with:
-          cache-read-only: false
-
-      - name: Resolve Consensus Node Ref
-        id: resolve-cn-ref
-        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
-        run: |
-          CN_REF="${{ inputs.consensus-node-ref }}"
-          if [[ -z "${CN_REF}" ]]; then
-            echo "No consensus-node-ref provided, fetching latest from builds.hedera.com..."
-            CN_REF=$(bash .github/workflows/script/get_latest_cn_version.sh)
-            echo "Auto-detected CN version: ${CN_REF}"
-          fi
-          echo "cn-ref=${CN_REF}" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout and Build Consensus Node
-        id: cn-build
-        timeout-minutes: 60
-        run: |
-          CN_REF="${{ steps.resolve-cn-ref.outputs.cn-ref }}"
-          CN_REPO_DIR="${GITHUB_WORKSPACE}/../hiero-consensus-node"
-          echo "Cloning hiero-consensus-node at ref: ${CN_REF}"
-
-          git clone https://github.com/hiero-ledger/hiero-consensus-node.git \
-            --depth 1 --branch "${CN_REF}" "${CN_REPO_DIR}" 2>/dev/null || \
-          git clone https://github.com/hiero-ledger/hiero-consensus-node.git \
-            --depth 1 --branch "refs/tags/${CN_REF}" "${CN_REPO_DIR}"
-
-          cd "${CN_REPO_DIR}"
-          LOG_FILE="/tmp/consensus-node-build.log"
-          echo "Building consensus node (logging to ${LOG_FILE})..."
-          ./gradlew assemble --stacktrace --info > "${LOG_FILE}" 2>&1 || {
-            echo "Build failed. Last 100 lines:"
-            tail -100 "${LOG_FILE}"
-            exit 1
-          }
-          echo "Consensus node build complete."
-          echo "local-build-path=${CN_REPO_DIR}/hedera-node/data" >> "$GITHUB_OUTPUT"
-
-      - name: Get Solo Release Tag
-        id: get-version
-        uses: step-security/retry@38808b4332b98bb36ca031abff0c100231608288 # v4.0.0
-        with:
-          max_attempts: 3
-          timeout_minutes: 5
-          command: |
-            if [[ -n "${{ inputs.solo-release-tag }}" ]]; then
-              echo "version=${{ inputs.solo-release-tag }}" >> $GITHUB_OUTPUT
-            else
-              LATEST_VERSION=$(curl -s https://registry.npmjs.org/@hashgraph/solo/latest | jq -r '.version')
-              echo "Latest Solo version: ${LATEST_VERSION}"
-              echo "version=${LATEST_VERSION}" >> $GITHUB_OUTPUT
-            fi
-
-      - name: Launch Network with Prior Release ${{ steps.get-version.outputs.version }}
+      - name: Launch Network with Prior Release ${{ needs.setup-and-build.outputs.solo-version }}
         timeout-minutes: 90
         env:
-          CONSENSUS_NODE_VERSION: ${{ steps.resolve-cn-ref.outputs.cn-ref }}
+          CONSENSUS_NODE_VERSION: ${{ needs.setup-and-build.outputs.cn-ref }}
         run: |
           export PATH=~/.solo/bin:${PATH}
 
@@ -202,15 +250,15 @@ jobs:
           trap cleanup SIGTERM SIGINT
 
           .github/workflows/script/launch_network.sh \
-            "${{ steps.get-version.outputs.version }}" \
-            "${{ steps.cn-build.outputs.local-build-path }}" &
+            "${{ needs.setup-and-build.outputs.solo-version }}" \
+            "/tmp/cn-hedera-data" &
           SCRIPT_PID=$!
           wait "${SCRIPT_PID}" || RC=$?
           SCRIPT_PID=""
           trap - SIGTERM SIGINT
 
           if [[ "$RC" != "0" ]]; then
-            echo "Failed to launch network with release ${{ steps.get-version.outputs.version }}"
+            echo "Failed to launch network with release ${{ needs.setup-and-build.outputs.solo-version }}"
             exit $RC
           fi
 
@@ -221,7 +269,7 @@ jobs:
           export PATH=~/.solo/bin:${PATH}
           npm run solo-test -- deployment diagnostics logs -q --dev || true
 
-      - name: Upload Logs to GitHub
+      - name: Upload Solo Logs
         if: ${{ !cancelled() && always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
@@ -230,12 +278,14 @@ jobs:
           path: ~/.solo/logs/*
           if-no-files-found: error
 
+  # ── Job 3 ─────────────────────────────────────────────────────────────────
+  # Run the full e2e matrix in parallel with the migration test.
+  # Each test runner downloads the CN artifact and sets SOLO_LOCAL_BUILD_PATH.
   e2e-matrix-tests:
     name: E2E Tests
     uses: ./.github/workflows/zxc-e2e-matrix-test.yaml
-    needs:
-      - test-migration-local-cn-build
-    if: ${{ !cancelled() && needs.test-migration-local-cn-build.result == 'success' }}
+    needs: setup-and-build
+    if: ${{ !cancelled() && needs.setup-and-build.result == 'success' }}
     with:
-      consensus-node-version: ${{ needs.test-migration-local-cn-build.outputs.cn-ref }}
-      local-build-path: ${{ needs.test-migration-local-cn-build.outputs.local-build-path }}
+      consensus-node-version: ${{ needs.setup-and-build.outputs.cn-ref }}
+      cn-artifact-name: cn-hedera-data-${{ github.run_id }}

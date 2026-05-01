@@ -34,6 +34,11 @@ on:
         type: string
         required: false
         default: ""
+      cn-artifact-name:
+        description: "GitHub Actions artifact name containing CN hedera-node/data build (passed to each test runner for download):"
+        type: string
+        required: false
+        default: ""
 
 permissions:
   id-token: write
@@ -82,6 +87,7 @@ jobs:
     with:
       consensus-node-version: ${{ inputs.consensus-node-version }}
       local-build-path: ${{ inputs.local-build-path }}
+      cn-artifact-name: ${{ inputs.cn-artifact-name }}
       custom-job-label: ${{ matrix.e2e-test-type.name }}
       test-script: ${{ matrix.e2e-test-type.test-script }}
       coverage-subdirectory: ${{ matrix.e2e-test-type.coverage-subdirectory }}
