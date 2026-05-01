@@ -52,38 +52,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  generate_matrix:
-    runs-on: hiero-solo-linux-medium
-    outputs:
-      matrix: ${{ steps.set_matrix.outputs.matrix }}
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
-        with:
-          egress-policy: audit
-          # allow internal Podman/Kind HTTPS calls between pods/services on the runner (no internet egress)
-          allowed-endpoints: >
-            **.svc.cluster.local.dns.podman:443
-
-      - name: Checkout Code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Read JSON and Set Matrix Output
-        id: set_matrix
-        run: |
-          # Configure APT to use main Ubuntu archive (disable mirror rotation)
-          sudo sed -i 's|http://[a-z.]*.ubuntu.com|http://archive.ubuntu.com|g' /etc/apt/sources.list
-          # Install jq (a lightweight and flexible command-line JSON processor)
-          sudo apt-get update && sudo apt-get install -y jq
-
-          # Read the JSON file
-          JSON_CONTENT=$(cat .github/workflows/support/e2e-test-matrix.json | jq -c .)
-          
-          echo "JSON_CONTENT: $JSON_CONTENT"
-
-          # Set the output variable 'matrix' with the JSON content
-          echo "matrix=$JSON_CONTENT" >> $GITHUB_OUTPUT
-
   code-style:
     name: Code Style
     uses: ./.github/workflows/zxc-code-style.yaml
@@ -99,46 +67,22 @@ jobs:
     with:
       custom-job-label: Standard
 
-  e2e-tests:
-    name: E2E Tests (${{ matrix.e2e-test-type.name }})
-    if: ${{ !cancelled() && always() }}
-    uses: ./.github/workflows/zxc-e2e-test.yaml
+  e2e-matrix-tests:
+    name: E2E Tests
+    uses: ./.github/workflows/zxc-e2e-matrix-test.yaml
     needs:
-      - generate_matrix
       - code-style
-    strategy:
-      fail-fast: false
-      matrix:
-        e2e-test-type: ${{ fromJSON(needs.generate_matrix.outputs.matrix) }}
-      max-parallel: 3
+    if: ${{ !cancelled() && always() }}
     with:
       # Conditionally pass consensus-node-version only if triggered by workflow_dispatch
       consensus-node-version: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.consensus-node-version || '' }}
-      custom-job-label: ${{ matrix.e2e-test-type.name }}
-      test-script: ${{ matrix.e2e-test-type.test-script }}
-      coverage-subdirectory: ${{ matrix.e2e-test-type.coverage-subdirectory }}
-      coverage-report-name: ${{ matrix.e2e-test-type.coverage-report-name }}
-      local-java-build: ${{ matrix.e2e-test-type.local-java-build }}
-      cluster-name: ${{ matrix.e2e-test-type.coverage-subdirectory }}-${{ github.run_id }}-${{ github.run_attempt }}
-      install-dependencies: ${{ matrix.e2e-test-type.install-dependencies }}
-      runner: ${{ matrix.e2e-test-type.runner }}
-      kind-install: ${{ matrix.e2e-test-type.kind-install }}
-      kind-version: ${{ matrix.e2e-test-type.kind-version }}
-      kind-node-image: ${{ matrix.e2e-test-type.kind-node-image }}
-      kubectl-install: ${{ matrix.e2e-test-type.kubectl-install }}
-      kubectl-version: ${{ matrix.e2e-test-type.kubectl-version }}
-      helm-install: ${{ matrix.e2e-test-type.helm-install }}
-      helm-version: ${{ matrix.e2e-test-type.helm-version }}
-      node-version: ${{ matrix.e2e-test-type.node-version }}
-      enable_s6_image: ${{ matrix.e2e-test-type.enable_s6_image }}
-      test-timeout-minutes: ${{ matrix.e2e-test-type.test-timeout-minutes }}
 
   codecov:
     name: CodeCov
     uses: ./.github/workflows/zxc-code-analysis.yaml
     needs:
       - unit-tests
-      - e2e-tests
+      - e2e-matrix-tests
     if: >-
       ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.skip-unit-and-coverage) &&
       !cancelled() && !failure() }}
@@ -154,7 +98,7 @@ jobs:
     uses: ./.github/workflows/zxc-code-analysis.yaml
     needs:
       - unit-tests
-      - e2e-tests
+      - e2e-matrix-tests
     if: >-
       ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.skip-unit-and-coverage) &&
       !cancelled() && !failure() &&

@@ -1,0 +1,102 @@
+##
+# Copyright (C) 2023-2025 Hedera Hashgraph, LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##
+
+name: "ZXC: E2E Matrix Test"
+# Reusable workflow: reads e2e-test-matrix.json, generates the matrix, and fans
+# out to zxc-e2e-test.yaml for every entry.
+# Called by:
+#   - .github/workflows/flow-pull-request-checks.yaml
+#   - .github/workflows/flow_tck_test.yaml
+
+on:
+  workflow_call:
+    inputs:
+      consensus-node-version:
+        description: "Consensus Node Version (leave empty to use version.ts default):"
+        type: string
+        required: false
+        default: ""
+      local-build-path:
+        description: "Local consensus node build path (sets SOLO_LOCAL_BUILD_PATH for all tests):"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+  actions: read
+  pull-requests: write
+  checks: write
+  statuses: write
+
+jobs:
+  generate_matrix:
+    runs-on: hiero-solo-linux-medium
+    outputs:
+      matrix: ${{ steps.set_matrix.outputs.matrix }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          egress-policy: audit
+          allowed-endpoints: >
+            **.svc.cluster.local.dns.podman:443
+
+      - name: Checkout Code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Read JSON and Set Matrix Output
+        id: set_matrix
+        run: |
+          sudo sed -i 's|http://[a-z.]*.ubuntu.com|http://archive.ubuntu.com|g' /etc/apt/sources.list
+          sudo apt-get update && sudo apt-get install -y jq
+          JSON_CONTENT=$(cat .github/workflows/support/e2e-test-matrix.json | jq -c .)
+          echo "JSON_CONTENT: $JSON_CONTENT"
+          echo "matrix=$JSON_CONTENT" >> $GITHUB_OUTPUT
+
+  e2e-tests:
+    name: E2E Tests (${{ matrix.e2e-test-type.name }})
+    if: ${{ !cancelled() && always() }}
+    uses: ./.github/workflows/zxc-e2e-test.yaml
+    needs:
+      - generate_matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        e2e-test-type: ${{ fromJSON(needs.generate_matrix.outputs.matrix) }}
+      max-parallel: 3
+    with:
+      consensus-node-version: ${{ inputs.consensus-node-version }}
+      local-build-path: ${{ inputs.local-build-path }}
+      custom-job-label: ${{ matrix.e2e-test-type.name }}
+      test-script: ${{ matrix.e2e-test-type.test-script }}
+      coverage-subdirectory: ${{ matrix.e2e-test-type.coverage-subdirectory }}
+      coverage-report-name: ${{ matrix.e2e-test-type.coverage-report-name }}
+      local-java-build: ${{ matrix.e2e-test-type.local-java-build }}
+      cluster-name: ${{ matrix.e2e-test-type.coverage-subdirectory }}-${{ github.run_id }}-${{ github.run_attempt }}
+      install-dependencies: ${{ matrix.e2e-test-type.install-dependencies }}
+      runner: ${{ matrix.e2e-test-type.runner }}
+      kind-install: ${{ matrix.e2e-test-type.kind-install }}
+      kind-version: ${{ matrix.e2e-test-type.kind-version }}
+      kind-node-image: ${{ matrix.e2e-test-type.kind-node-image }}
+      kubectl-install: ${{ matrix.e2e-test-type.kubectl-install }}
+      kubectl-version: ${{ matrix.e2e-test-type.kubectl-version }}
+      helm-install: ${{ matrix.e2e-test-type.helm-install }}
+      helm-version: ${{ matrix.e2e-test-type.helm-version }}
+      node-version: ${{ matrix.e2e-test-type.node-version }}
+      enable_s6_image: ${{ matrix.e2e-test-type.enable_s6_image }}
+      test-timeout-minutes: ${{ matrix.e2e-test-type.test-timeout-minutes }}

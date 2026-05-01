@@ -1,0 +1,238 @@
+##
+# Copyright (C) 2023-2025 Hedera Hashgraph, LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##
+
+name: "TCK Test (Local CN Build)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      consensus-node-ref:
+        description: "Consensus node tag or branch to build locally (e.g. v0.58.0). Leave empty to auto-detect latest from builds.hedera.com."
+        type: string
+        required: false
+        default: ""
+      solo-release-tag:
+        description: "Solo NPM release tag to launch the network with (leave empty to use latest)"
+        type: string
+        required: false
+        default: ""
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  id-token: write
+  contents: read
+  actions: read
+  pull-requests: write
+  checks: write
+  statuses: write
+
+env:
+  STEP_TIMEOUT_MINUTES: '5'
+  KIND_DOCKER_REGISTRY_MIRRORS: ${{ vars.KIND_DOCKER_REGISTRY_MIRRORS }}
+
+jobs:
+  test-migration-local-cn-build:
+    name: Migration Test (Local CN Build)
+    timeout-minutes: 120
+    runs-on: hiero-solo-linux-large
+    outputs:
+      local-build-path: ${{ steps.cn-build.outputs.local-build-path }}
+      cn-ref: ${{ steps.resolve-cn-ref.outputs.cn-ref }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Helm
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
+        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
+        with:
+          version: "v3.12.3"
+
+      - name: Setup Kind
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
+        with:
+          install_only: true
+          node_image: kindest/node:v1.31.4@sha256:2cb39f7295fe7eafee0842b1052a599a4fb0f8bcf3f83d96c7f4864c357c6c30
+          version: v0.26.0
+          kubectl_version: v1.31.4
+          verbosity: 3
+          wait: 120s
+
+      - name: Install Kubectl
+        uses: step-security/setup-kubectl@8489d0d7bf2110e44a330d8db821786e6e8c8d73 # pinned to v4.0.2
+        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
+        with:
+          version: 'v1.27.3'
+        id: install
+
+      - name: Setup Java
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
+        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
+        with:
+          cache-read-only: false
+
+      - name: Resolve Consensus Node Ref
+        id: resolve-cn-ref
+        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
+        run: |
+          CN_REF="${{ inputs.consensus-node-ref }}"
+          if [[ -z "${CN_REF}" ]]; then
+            echo "No consensus-node-ref provided, fetching latest from builds.hedera.com..."
+            CN_REF=$(bash .github/workflows/script/get_latest_cn_version.sh)
+            echo "Auto-detected CN version: ${CN_REF}"
+          fi
+          echo "cn-ref=${CN_REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout and Build Consensus Node
+        id: cn-build
+        timeout-minutes: 60
+        run: |
+          CN_REF="${{ steps.resolve-cn-ref.outputs.cn-ref }}"
+          CN_REPO_DIR="${GITHUB_WORKSPACE}/../hiero-consensus-node"
+          echo "Cloning hiero-consensus-node at ref: ${CN_REF}"
+
+          git clone https://github.com/hiero-ledger/hiero-consensus-node.git \
+            --depth 1 --branch "${CN_REF}" "${CN_REPO_DIR}" 2>/dev/null || \
+          git clone https://github.com/hiero-ledger/hiero-consensus-node.git \
+            --depth 1 --branch "refs/tags/${CN_REF}" "${CN_REPO_DIR}"
+
+          cd "${CN_REPO_DIR}"
+          LOG_FILE="/tmp/consensus-node-build.log"
+          echo "Building consensus node (logging to ${LOG_FILE})..."
+          ./gradlew assemble --stacktrace --info > "${LOG_FILE}" 2>&1 || {
+            echo "Build failed. Last 100 lines:"
+            tail -100 "${LOG_FILE}"
+            exit 1
+          }
+          echo "Consensus node build complete."
+          echo "local-build-path=${CN_REPO_DIR}/hedera-node/data" >> "$GITHUB_OUTPUT"
+
+      - name: Get Solo Release Tag
+        id: get-version
+        uses: step-security/retry@38808b4332b98bb36ca031abff0c100231608288 # v4.0.0
+        with:
+          max_attempts: 3
+          timeout_minutes: 5
+          command: |
+            if [[ -n "${{ inputs.solo-release-tag }}" ]]; then
+              echo "version=${{ inputs.solo-release-tag }}" >> $GITHUB_OUTPUT
+            else
+              LATEST_VERSION=$(curl -s https://registry.npmjs.org/@hashgraph/solo/latest | jq -r '.version')
+              echo "Latest Solo version: ${LATEST_VERSION}"
+              echo "version=${LATEST_VERSION}" >> $GITHUB_OUTPUT
+            fi
+
+      - name: Launch Network with Prior Release ${{ steps.get-version.outputs.version }}
+        timeout-minutes: 90
+        env:
+          CONSENSUS_NODE_VERSION: ${{ steps.resolve-cn-ref.outputs.cn-ref }}
+        run: |
+          export PATH=~/.solo/bin:${PATH}
+
+          echo "Configure APT to use main Ubuntu archive (disable mirror rotation)..."
+          sudo sed -i 's|http://[a-z.]*.ubuntu.com|http://archive.ubuntu.com|g' /etc/apt/sources.list
+
+          echo "Install yq..."
+          YQ_VERSION="v4.44.1"
+          YQ_BINARY="yq_linux_amd64"
+          wget -q "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${YQ_BINARY}" -O /tmp/yq
+          sudo chmod +x /tmp/yq
+          sudo mv /tmp/yq /usr/local/bin/yq
+          yq --version
+
+          npm install
+          task build:compile
+
+          SCRIPT_PID=""
+          RC=0
+
+          cleanup() {
+            if [[ -n "${SCRIPT_PID}" ]]; then
+              echo "Received cancellation signal, stopping launch_network.sh (PID ${SCRIPT_PID})..."
+              kill "${SCRIPT_PID}" 2>/dev/null || true
+              wait "${SCRIPT_PID}" 2>/dev/null || true
+            fi
+            exit 1
+          }
+          trap cleanup SIGTERM SIGINT
+
+          .github/workflows/script/launch_network.sh \
+            "${{ steps.get-version.outputs.version }}" \
+            "${{ steps.cn-build.outputs.local-build-path }}" &
+          SCRIPT_PID=$!
+          wait "${SCRIPT_PID}" || RC=$?
+          SCRIPT_PID=""
+          trap - SIGTERM SIGINT
+
+          if [[ "$RC" != "0" ]]; then
+            echo "Failed to launch network with release ${{ steps.get-version.outputs.version }}"
+            exit $RC
+          fi
+
+      - name: Collect Deployment Diagnostics Logs
+        if: ${{ !cancelled() && always() }}
+        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
+        run: |
+          export PATH=~/.solo/bin:${PATH}
+          npm run solo-test -- deployment diagnostics logs -q --dev || true
+
+      - name: Upload Logs to GitHub
+        if: ${{ !cancelled() && always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
+        with:
+          name: solo-logs
+          path: ~/.solo/logs/*
+          if-no-files-found: error
+
+  e2e-matrix-tests:
+    name: E2E Tests
+    uses: ./.github/workflows/zxc-e2e-matrix-test.yaml
+    needs:
+      - test-migration-local-cn-build
+    if: ${{ !cancelled() && needs.test-migration-local-cn-build.result == 'success' }}
+    with:
+      consensus-node-version: ${{ needs.test-migration-local-cn-build.outputs.cn-ref }}
+      local-build-path: ${{ needs.test-migration-local-cn-build.outputs.local-build-path }}

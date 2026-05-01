@@ -118,6 +118,11 @@ on:
         type: number
         required: false
         default: 60
+      local-build-path:
+        description: "Local consensus node build path (sets SOLO_LOCAL_BUILD_PATH):"
+        type: string
+        required: false
+        default: ""
   workflow_call:
     inputs:
       consensus-node-version:
@@ -215,6 +220,11 @@ on:
         type: number
         required: false
         default: 60
+      local-build-path:
+        description: "Local consensus node build path (sets SOLO_LOCAL_BUILD_PATH):"
+        type: string
+        required: false
+        default: ""
 
 defaults:
   run:
@@ -234,6 +244,7 @@ env:
   KIND_DOCKER_REGISTRY_MIRRORS: ${{ vars.KIND_DOCKER_REGISTRY_MIRRORS }}
   SOLO_CLUSTER_DUALITY: ${{ (inputs.test-script == 'test-e2e-dual-cluster-full' || inputs.test-script == 'test-e2e-external-database') && 2 || 1 }}
   ENABLE_S6_IMAGE: ${{ inputs.enable_s6_image }}
+  SOLO_LOCAL_BUILD_PATH: ${{ inputs.local-build-path }}
   STEP_TIMEOUT_MINUTES: '5'
 
 jobs:
