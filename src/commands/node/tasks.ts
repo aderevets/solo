@@ -1918,20 +1918,72 @@ export class NodeCommandTasks {
                 config.namespace,
                 nodeAlias,
               );
-              for (const directory of [constants.HEDERA_DATA_APPS_DIR, constants.HEDERA_DATA_LIB_DIR]) {
-                const directoryPath: string = `${constants.HEDERA_HAPI_PATH}/${directory}`;
-                const output: string = await container.execContainer([
+
+              const jarDirectoryCandidates: Array<{
+                primary: string;
+                fallbacks: string[];
+              }> = [
+                {
+                  primary: `${constants.HEDERA_HAPI_PATH}/${constants.HEDERA_DATA_APPS_DIR}`,
+                  fallbacks: [`${constants.HEDERA_HAPI_PATH}/data/upgrade/current/data/apps`],
+                },
+                {
+                  primary: `${constants.HEDERA_HAPI_PATH}/${constants.HEDERA_DATA_LIB_DIR}`,
+                  fallbacks: [
+                    `${constants.HEDERA_HAPI_PATH}/data/upgrade/current/data/lib`,
+                    `${constants.HEDERA_HAPI_PATH}/data/upgrade/current/data/libs`,
+                  ],
+                },
+              ];
+
+              for (const candidate of jarDirectoryCandidates) {
+                const countCommandForDirectory: (directoryPath: string) => string = (directoryPath): string =>
+                  `ls "${directoryPath}"/*.jar 2>/dev/null | wc -l`;
+
+                const primaryCountOutput: string = await container.execContainer([
                   'bash',
                   '-c',
-                  `ls "${directoryPath}"/*.jar 2>/dev/null | wc -l`,
+                  countCommandForDirectory(candidate.primary),
                 ]);
-                if (Number.parseInt(output.trim(), 10) === 0) {
+                const primaryJarCount: number = Number.parseInt(primaryCountOutput.trim(), 10);
+
+                if (primaryJarCount > 0) {
+                  continue;
+                }
+
+                let recoveredFromFallback: boolean = false;
+                for (const fallbackDirectory of candidate.fallbacks) {
+                  const fallbackCountOutput: string = await container.execContainer([
+                    'bash',
+                    '-c',
+                    countCommandForDirectory(fallbackDirectory),
+                  ]);
+                  const fallbackJarCount: number = Number.parseInt(fallbackCountOutput.trim(), 10);
+
+                  if (fallbackJarCount === 0) {
+                    continue;
+                  }
+
+                  this.logger.warn(
+                    `Node '${nodeAlias}': no JAR files found in ${candidate.primary}; recovering from ${fallbackDirectory}`,
+                  );
+                  await container.execContainer([
+                    'bash',
+                    '-c',
+                    `mkdir -p "${candidate.primary}" && cp -f "${fallbackDirectory}"/*.jar "${candidate.primary}/"`,
+                  ]);
+                  recoveredFromFallback = true;
+                  break;
+                }
+
+                if (!recoveredFromFallback) {
                   throw new SoloError(
-                    `Node '${nodeAlias}': no JAR files found in ${directoryPath}. ` +
+                    `Node '${nodeAlias}': no JAR files found in ${candidate.primary}. ` +
                       'Ensure platform software was copied to the node before starting.',
                   );
                 }
               }
+
               await container.execContainer(['bash', '-c', startCommand]);
             },
           });
