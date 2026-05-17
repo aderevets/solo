@@ -285,7 +285,7 @@ export class ComponentsDataWrapper implements ComponentsDataWrapperApi {
         } catch {
           // Keep idempotent reruns resilient when component IDs drift after interrupted deploys.
           const componentsByType: BaseStateSchema[] = this.getComponentByType<BaseStateSchema>(componentType);
-          // eslint-disable-next-line unicorn/no-array-sort
+
           componentsByType.sort(
             (componentA: BaseStateSchema, componentB: BaseStateSchema): number =>
               componentA.metadata.id - componentB.metadata.id,

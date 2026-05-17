@@ -617,7 +617,9 @@ export class DefaultOneShotDeployOrchestrator implements OneShotDeployOrchestrat
               ),
           }).withWaitCondition(SoloEventType.MirrorNodeDeployed, Duration.ofMinutes(10)),
           new OrchestratorPipelinePhase('Deploy JSON-RPC Relay', {
-            asListrTask: (getConfig: () => OneShotSingleDeployConfigClass): SoloListrTask<OneShotSingleDeployContext> => ({
+            asListrTask: (
+              getConfig: () => OneShotSingleDeployConfigClass,
+            ): SoloListrTask<OneShotSingleDeployContext> => ({
               title: `solo ${RelayCommandDefinition.ADD_COMMAND}`,
               skip: (): boolean => !getConfig().deployRelay && !getConfig().minimalSetup,
               task: async (

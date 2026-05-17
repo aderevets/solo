@@ -58,6 +58,11 @@ argv.setArg(flags.force, true);
 argv.setArg(flags.clusterSetupNamespace, constants.SOLO_SETUP_NAMESPACE.name);
 
 describe('ClusterCommand unit tests', (): void => {
+  type ClusterConnectionTask = (
+    context: {config: {context: string; clusterRef: string}},
+    task: {title: string},
+  ) => Promise<void>;
+
   before(async (): Promise<void> => {
     resetForTest(namespace.name);
     const localConfig: LocalConfigRuntimeState = container.resolve(InjectTokens.LocalConfigRuntimeState);
@@ -125,7 +130,7 @@ describe('ClusterCommand unit tests', (): void => {
     });
 
     it('treats forbidden namespace listing as a valid restricted context', async (): Promise<void> => {
-      const loggerStub: sinon.SinonStubbedInstance<SoloLogger> = sandbox.createStubInstance(SoloPinoLogger);
+      const loggerStub: sinon.SinonStubbedInstance<SoloPinoLogger> = sandbox.createStubInstance(SoloPinoLogger);
       const namespacesStub: {list: sinon.SinonStub} = {
         list: sandbox.stub().rejects(new SoloError('forbidden', {statusCode: 403})),
       };
@@ -146,7 +151,8 @@ describe('ClusterCommand unit tests', (): void => {
         {} as any,
       );
 
-      const taskDefinition: {title: string; task: Function} = tasks.testConnectionToCluster() as any;
+      const taskDefinition: {title: string; task: ClusterConnectionTask} =
+        tasks.testConnectionToCluster() as unknown as {title: string; task: ClusterConnectionTask};
       const taskContext: {config: {context: string; clusterRef: string}} = {
         config: {context: 'inClusterContext', clusterRef: 'one-shot'},
       };
@@ -158,7 +164,7 @@ describe('ClusterCommand unit tests', (): void => {
     });
 
     it('still fails invalid contexts for non-forbidden errors', async (): Promise<void> => {
-      const loggerStub: sinon.SinonStubbedInstance<SoloLogger> = sandbox.createStubInstance(SoloPinoLogger);
+      const loggerStub: sinon.SinonStubbedInstance<SoloPinoLogger> = sandbox.createStubInstance(SoloPinoLogger);
       const namespacesStub: {list: sinon.SinonStub} = {
         list: sandbox.stub().rejects(new Error('boom')),
       };
@@ -179,7 +185,8 @@ describe('ClusterCommand unit tests', (): void => {
         {} as any,
       );
 
-      const taskDefinition: {title: string; task: Function} = tasks.testConnectionToCluster() as any;
+      const taskDefinition: {title: string; task: ClusterConnectionTask} =
+        tasks.testConnectionToCluster() as unknown as {title: string; task: ClusterConnectionTask};
       const taskContext: {config: {context: string; clusterRef: string}} = {
         config: {context: 'inClusterContext', clusterRef: 'one-shot'},
       };
