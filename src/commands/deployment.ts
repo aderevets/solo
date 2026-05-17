@@ -49,6 +49,7 @@ import {DeploymentStateSchema} from '../data/schema/model/remote/deployment-stat
 import yaml from 'yaml';
 import {PathEx} from '../business/utils/path-ex.js';
 import fs from 'node:fs/promises';
+import {ResourceNotFoundError} from '../integration/kube/errors/resource-operation-errors.js';
 
 interface DeploymentAddClusterConfig {
   quiet: boolean;
@@ -741,12 +742,6 @@ export class DeploymentCommand extends BaseCommand {
         if (!this.localConfig.configuration.deploymentByName(deployment)) {
           throw new SoloError(`Deployment ${deployment} not found in local config`);
         }
-
-        if (
-          this.localConfig.configuration.deploymentByName(deployment).clusters.includes(new StringFacade(clusterRef))
-        ) {
-          throw new SoloError(`Cluster ref ${clusterRef} is already added for deployment`);
-        }
       },
     };
   }
@@ -798,7 +793,36 @@ export class DeploymentCommand extends BaseCommand {
 
         context_.config.existingClusterContext = existingClusterContext;
 
-        await this.remoteConfig.populateFromExisting(namespace, existingClusterContext);
+        try {
+          await this.remoteConfig.populateFromExisting(namespace, existingClusterContext);
+        } catch (error: unknown) {
+          if (
+            error instanceof ResourceNotFoundError ||
+            (error as {cause?: unknown}).cause instanceof ResourceNotFoundError
+          ) {
+            context_.config.ledgerPhase = LedgerPhase.UNINITIALIZED;
+
+            if (!numberOfConsensusNodes && quiet) {
+              throw new SoloError(
+                `--${flags.numberOfConsensusNodes.name} must be specified ${LedgerPhase.UNINITIALIZED}`,
+              );
+            }
+
+            if (!numberOfConsensusNodes) {
+              await this.configManager.executePrompt(task, [flags.numberOfConsensusNodes]);
+              context_.config.numberOfConsensusNodes = this.configManager.getFlag<number>(flags.numberOfConsensusNodes);
+            }
+
+            context_.config.nodeAliases = Templates.renderNodeAliasesFromCount(
+              context_.config.numberOfConsensusNodes,
+              0,
+            );
+
+            return;
+          }
+
+          throw error;
+        }
 
         const ledgerPhase: LedgerPhase = this.remoteConfig.configuration.state.ledgerPhase;
 

@@ -256,7 +256,13 @@ export class DefaultOneShotDeployOrchestrator implements OneShotDeployOrchestrat
               );
 
               if (hasClusterReferenceAttached) {
-                shouldAttachDeployment = false;
+                const remoteConfigExists: boolean = await this.k8Factory
+                  .getK8(config.context)
+                  .configMaps()
+                  .exists(config.namespace, constants.SOLO_REMOTE_CONFIGMAP_NAME)
+                  .catch((): boolean => false);
+
+                shouldAttachDeployment = !remoteConfigExists;
               }
 
               this.logger.info(
@@ -442,59 +448,91 @@ export class DefaultOneShotDeployOrchestrator implements OneShotDeployOrchestrat
           task: async (): Promise<void> => {
             const deployConfig: OneShotSingleDeployConfigClass = getConfig();
             if (constants.ONE_SHOT_WITH_BLOCK_NODE === 'true') {
-              const blockNode: BlockNodeStateSchema = this.componentFactory.createNewBlockNodeComponent(
-                deployConfig.clusterRef,
-                deployConfig.namespace,
-              );
-              blockNode.metadata.phase = DeploymentPhase.REQUESTED;
-              this.remoteConfig.configuration.components.addNewComponent(
-                blockNode,
-                ComponentTypes.BlockNode,
-                false,
-                true,
-              );
+              const existingBlockNodes: unknown[] =
+                this.remoteConfig.configuration.components.getComponentsByClusterReference(
+                  ComponentTypes.BlockNode,
+                  deployConfig.clusterRef,
+                );
+              if (existingBlockNodes.length === 0) {
+                const blockNode: BlockNodeStateSchema = this.componentFactory.createNewBlockNodeComponent(
+                  deployConfig.clusterRef,
+                  deployConfig.namespace,
+                );
+                blockNode.metadata.phase = DeploymentPhase.REQUESTED;
+                this.remoteConfig.configuration.components.addNewComponent(
+                  blockNode,
+                  ComponentTypes.BlockNode,
+                  false,
+                  true,
+                );
+              }
             }
 
             if (deployConfig.deployExplorer) {
-              const explorer: ExplorerStateSchema = this.componentFactory.createNewExplorerComponent(
-                deployConfig.clusterRef,
-                deployConfig.namespace,
-              );
-              explorer.metadata.phase = DeploymentPhase.REQUESTED;
-              this.remoteConfig.configuration.components.addNewComponent(
-                explorer,
-                ComponentTypes.Explorer,
-                false,
-                true,
-              );
+              const existingExplorers: unknown[] =
+                this.remoteConfig.configuration.components.getComponentsByClusterReference(
+                  ComponentTypes.Explorer,
+                  deployConfig.clusterRef,
+                );
+              if (existingExplorers.length === 0) {
+                const explorer: ExplorerStateSchema = this.componentFactory.createNewExplorerComponent(
+                  deployConfig.clusterRef,
+                  deployConfig.namespace,
+                );
+                explorer.metadata.phase = DeploymentPhase.REQUESTED;
+                this.remoteConfig.configuration.components.addNewComponent(
+                  explorer,
+                  ComponentTypes.Explorer,
+                  false,
+                  true,
+                );
+              }
             }
 
             if (deployConfig.deployMirrorNode) {
-              const mirrorNode: MirrorNodeStateSchema = this.componentFactory.createNewMirrorNodeComponent(
-                deployConfig.clusterRef,
-                deployConfig.namespace,
-              );
-              mirrorNode.metadata.phase = DeploymentPhase.REQUESTED;
-              this.remoteConfig.configuration.components.addNewComponent(
-                mirrorNode,
-                ComponentTypes.MirrorNode,
-                false,
-                true,
-              );
+              const existingMirrorNodes: unknown[] =
+                this.remoteConfig.configuration.components.getComponentsByClusterReference(
+                  ComponentTypes.MirrorNode,
+                  deployConfig.clusterRef,
+                );
+              if (existingMirrorNodes.length === 0) {
+                const mirrorNode: MirrorNodeStateSchema = this.componentFactory.createNewMirrorNodeComponent(
+                  deployConfig.clusterRef,
+                  deployConfig.namespace,
+                );
+                mirrorNode.metadata.phase = DeploymentPhase.REQUESTED;
+                this.remoteConfig.configuration.components.addNewComponent(
+                  mirrorNode,
+                  ComponentTypes.MirrorNode,
+                  false,
+                  true,
+                );
+              }
             }
 
             if (deployConfig.deployRelay) {
-              const nodeIds: NodeId[] = [];
-              for (const alias of Templates.renderNodeAliasesFromCount(deployConfig.numberOfConsensusNodes, 0)) {
-                nodeIds.push(Templates.nodeIdFromNodeAlias(alias));
-              }
-              const relay: RelayNodeStateSchema = this.componentFactory.createNewRelayComponent(
+              const existingRelays: unknown[] = this.remoteConfig.configuration.components.getComponentsByClusterReference(
+                ComponentTypes.RelayNodes,
                 deployConfig.clusterRef,
-                deployConfig.namespace,
-                nodeIds,
               );
-              relay.metadata.phase = DeploymentPhase.REQUESTED;
-              this.remoteConfig.configuration.components.addNewComponent(relay, ComponentTypes.RelayNodes, false, true);
+              if (existingRelays.length === 0) {
+                const nodeIds: NodeId[] = [];
+                for (const alias of Templates.renderNodeAliasesFromCount(deployConfig.numberOfConsensusNodes, 0)) {
+                  nodeIds.push(Templates.nodeIdFromNodeAlias(alias));
+                }
+                const relay: RelayNodeStateSchema = this.componentFactory.createNewRelayComponent(
+                  deployConfig.clusterRef,
+                  deployConfig.namespace,
+                  nodeIds,
+                );
+                relay.metadata.phase = DeploymentPhase.REQUESTED;
+                this.remoteConfig.configuration.components.addNewComponent(
+                  relay,
+                  ComponentTypes.RelayNodes,
+                  false,
+                  true,
+                );
+              }
             }
 
             await this.remoteConfig.persist();
