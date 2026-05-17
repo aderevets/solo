@@ -41,6 +41,9 @@ export class IntervalLock implements Lock {
   /** The identifier of the scheduled lease renewal. */
   private _scheduleId: number | null = null;
 
+  /** Whether lease operations are disabled due to insufficient RBAC permissions. */
+  private _disabledDueToPermissions: boolean = false;
+
   /**
    * @param k8Factory - Injected kubernetes K8Factory need by the methods to create, renew, and delete leases.
    * @param renewalService - Injected lock renewal service need to support automatic (background) lock renewals.
@@ -135,10 +138,19 @@ export class IntervalLock implements Lock {
    * @throws LockAcquisitionError - If the lock is already acquired by another process or an error occurs during acquisition.
    */
   async acquire(): Promise<void> {
+    if (this._disabledDueToPermissions) {
+      return;
+    }
+
     let lease: Lease;
     try {
       lease = await this.retrieveLease();
     } catch (error) {
+      if (IntervalLock.hasStatusCode(error, StatusCodes.FORBIDDEN)) {
+        this.disableLockDueToPermissions('acquire');
+        return;
+      }
+
       throw new LockAcquisitionError(
         `failed to read during acquire, the lease named '${this.leaseName}' in the ` +
           `'${this.namespace}' namespace, caused by: ${error.message}`,
@@ -212,10 +224,19 @@ export class IntervalLock implements Lock {
    * @throws LockAcquisitionError - If the lock is already acquired by another process or an error occurs during renewal.
    */
   async renew(): Promise<void> {
+    if (this._disabledDueToPermissions) {
+      return;
+    }
+
     let lease: Lease;
     try {
       lease = await this.retrieveLease();
     } catch (error) {
+      if (IntervalLock.hasStatusCode(error, StatusCodes.FORBIDDEN)) {
+        this.disableLockDueToPermissions('renew');
+        return;
+      }
+
       throw new LockAcquisitionError(
         `failed to read the lease named '${this.leaseName}' in the ` +
           `'${this.namespace}' namespace, caused by: ${error.message}`,
@@ -266,10 +287,19 @@ export class IntervalLock implements Lock {
    * @throws LockRelinquishmentError - If the lock is already acquired by another process or an error occurs during relinquishment.
    */
   async release(immediate: boolean = false): Promise<void> {
+    if (this._disabledDueToPermissions) {
+      return;
+    }
+
     let lease: Lease;
     try {
       lease = await this.retrieveLease();
     } catch (error) {
+      if (IntervalLock.hasStatusCode(error, StatusCodes.FORBIDDEN)) {
+        this.disableLockDueToPermissions('release');
+        return;
+      }
+
       throw new LockAcquisitionError(
         `during release, failed to read the lease named '${this.leaseName}' in the ` +
           `'${this.namespace}' namespace, caused by: ${error.message}`,
@@ -327,6 +357,10 @@ export class IntervalLock implements Lock {
    * @returns true if the lock is acquired and not expired; otherwise, false.
    */
   async isAcquired(): Promise<boolean> {
+    if (this._disabledDueToPermissions) {
+      return false;
+    }
+
     const lease: Lease | undefined = await this.retrieveLease();
     return !!lease && !IntervalLock.checkExpiration(lease) && this.heldBySameProcess(lease);
   }
@@ -338,6 +372,10 @@ export class IntervalLock implements Lock {
    * @returns true if the lock is expired; otherwise, false.
    */
   async isExpired(): Promise<boolean> {
+    if (this._disabledDueToPermissions) {
+      return false;
+    }
+
     const lease: Lease | undefined = await this.retrieveLease();
     return !!lease && IntervalLock.checkExpiration(lease);
   }
@@ -377,6 +415,10 @@ export class IntervalLock implements Lock {
    * @param lease - The lease to be created or renewed.
    */
   private async createOrRenewLease(lease: Lease): Promise<void> {
+    if (this._disabledDueToPermissions) {
+      return;
+    }
+
     try {
       if (!(await this.k8Factory.default().namespaces().has(this.namespace))) {
         // handles the condition for creating a lease on cluster setup which may not have a namespace created yet
@@ -401,23 +443,34 @@ export class IntervalLock implements Lock {
         this.scheduleId = await this.renewalService.schedule(this);
       }
     } catch (error) {
-      if (this.scheduleId && IntervalLock.hasStatusCode(error, StatusCodes.FORBIDDEN)) {
-        // A 403 during renewal most likely means the namespace is being terminated.
-        // Cancel the renewal schedule and return gracefully instead of propagating the error.
-        container
-          .resolve<SoloLogger>(InjectTokens.SoloLogger)
-          .info(
-            `lease '${this.leaseName}' renewal forbidden in namespace '${this.namespace}'; namespace may be terminating, stopping renewal`,
-          );
-        await this.renewalService.cancel(this.scheduleId);
-        this.scheduleId = null;
+      if (IntervalLock.hasStatusCode(error, StatusCodes.FORBIDDEN)) {
+        this.disableLockDueToPermissions('create-or-renew');
         return;
       }
+
       throw new LockAcquisitionError(
         `failed to create or renew the lease named '${this.leaseName}' in the ` + `'${this.namespace}' namespace`,
         error,
       );
     }
+  }
+
+  /**
+   * Disables lock operations when lease access is forbidden by RBAC and emits a one-time warning.
+   *
+   * @param operation - lock operation that encountered the permission error
+   */
+  private disableLockDueToPermissions(operation: string): void {
+    if (this._disabledDueToPermissions) {
+      return;
+    }
+
+    this._disabledDueToPermissions = true;
+    container
+      .resolve<SoloLogger>(InjectTokens.SoloLogger)
+      .warn(
+        `lease lock operation '${operation}' is forbidden in namespace '${this.namespace}'; continuing without a deployment lease lock`,
+      );
   }
 
   /**
