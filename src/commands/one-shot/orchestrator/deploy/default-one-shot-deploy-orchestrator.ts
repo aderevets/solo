@@ -236,6 +236,13 @@ export class DefaultOneShotDeployOrchestrator implements OneShotDeployOrchestrat
 
             if (existingDeployment) {
               const existingNamespace: string = existingDeployment.namespace;
+
+              const isNamespaceProvidedByUser: boolean = typeof argv.namespace === 'string' && argv.namespace.length > 0;
+              if (!isNamespaceProvidedByUser) {
+                config.namespace = NamespaceName.of(existingNamespace);
+                this.configManager.setFlag(flags.namespace, config.namespace);
+              }
+
               if (existingNamespace !== config.namespace.name) {
                 throw new SoloError(
                   `Deployment '${config.deployment}' already exists in namespace '${existingNamespace}', requested namespace '${config.namespace.name}'`,

@@ -17,6 +17,7 @@ import * as yaml from 'yaml';
 import {type AnyObject} from '../types/aliases.js';
 import path from 'node:path';
 import {KindClient} from '../integration/kind/kind-client.js';
+import {type KindCluster} from '../integration/kind/model/kind-cluster.js';
 import {ClusterCreateResponse} from '../integration/kind/model/create-cluster/cluster-create-response.js';
 import {type ClusterCreateOptions} from '../integration/kind/model/create-cluster/cluster-create-options.js';
 import {ClusterCreateOptionsBuilder} from '../integration/kind/model/create-cluster/create-cluster-options-builder.js';
@@ -298,6 +299,15 @@ export class ClusterTaskManager extends ShellRunner {
       task: async (): Promise<void> => {
         const kindExecutable: string = await this.kindDependencyManager.getExecutable();
         const kindClient: KindClient = await this.kindBuilder.executable(kindExecutable).build();
+
+        const existingClusters: KindCluster[] = await kindClient.getClusters();
+        const hasDefaultCluster: boolean = existingClusters.some(
+          (kindCluster: KindCluster): boolean => kindCluster.name === constants.DEFAULT_CLUSTER,
+        );
+        if (hasDefaultCluster) {
+          parentTask.title = `Default cluster '${constants.DEFAULT_CLUSTER}' already exists; reusing it`;
+          return;
+        }
 
         if (constants.CONFIG.ENABLE_IMAGE_CACHE) {
           const kindImageCacheHandler: ImageCacheHandler = new ImageCacheHandlerBuilder()

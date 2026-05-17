@@ -149,4 +149,79 @@ describe('DefaultOneShotDeployOrchestrator', (): void => {
     expect((deploymentCreateTask.skip as () => boolean)()).to.equal(true);
     expect((deploymentAttachTask.skip as () => boolean)()).to.equal(true);
   });
+
+  it('reuses existing deployment namespace when namespace is not explicitly provided', async (): Promise<void> => {
+    const oneShotConfig: OneShotSingleDeployConfigClass = buildOneShotConfig();
+    oneShotConfig.namespace = NamespaceName.of('one-shot');
+
+    const localConfigState: AnyObject = {
+      deployments: [
+        {
+          name: oneShotConfig.deployment,
+          namespace: 'rss-hiero-solo-primary-linux-large',
+          clusters: [{toString: (): string => oneShotConfig.clusterRef}],
+        },
+      ],
+    };
+
+    const localConfigStub: AnyObject = {
+      load: async (): Promise<void> => undefined,
+      configuration: localConfigState,
+    };
+
+    const configManagerStub: AnyObject = {
+      update: (): void => undefined,
+      getFlag: (): unknown => false,
+      setFlag: (): void => undefined,
+      executePrompt: async (): Promise<void> => undefined,
+      getConfig: (): OneShotSingleDeployConfigClass => oneShotConfig,
+    };
+
+    const taskListStub: TaskList<any> = {} as unknown as TaskList<any>;
+    const eventBusStub: SoloEventBus = {} as unknown as SoloEventBus;
+    const accountManagerStub: AccountManager = {} as unknown as AccountManager;
+    const localConfigRuntimeStateStub: LocalConfigRuntimeState = localConfigStub as LocalConfigRuntimeState;
+    const remoteConfigRuntimeStateStub: RemoteConfigRuntimeStateApi = {
+      configuration: {components: {addNewComponent: (): void => undefined}},
+    } as unknown as RemoteConfigRuntimeStateApi;
+    const soloLoggerStub: SoloLogger = {
+      addLogBindings: (): void => undefined,
+      info: (): void => undefined,
+    } as unknown as SoloLogger;
+    const configManagerTypedStub: ConfigManager = configManagerStub as ConfigManager;
+    const oneShotStateStub: OneShotState = {activate: (): void => undefined} as unknown as OneShotState;
+    const k8FactoryStub: K8Factory = {
+      default: (): AnyObject => ({contexts: (): AnyObject => ({readCurrent: (): string => oneShotConfig.context})}),
+    } as unknown as K8Factory;
+    const lockManagerStub: LockManager = {} as unknown as LockManager;
+    const componentFactoryStub: ComponentFactoryApi = {} as unknown as ComponentFactoryApi;
+
+    const orchestrator: DefaultOneShotDeployOrchestrator = new DefaultOneShotDeployOrchestrator(
+      taskListStub,
+      eventBusStub,
+      accountManagerStub,
+      localConfigRuntimeStateStub,
+      remoteConfigRuntimeStateStub,
+      soloLoggerStub,
+      configManagerTypedStub,
+      oneShotStateStub,
+      k8FactoryStub,
+      lockManagerStub,
+      componentFactoryStub,
+    );
+
+    const commandFlags: CommandFlags = {required: [], optional: []};
+    const pipeline: OrchestratorPipeline<OneShotSingleDeployContext> = orchestrator.buildDeployPipeline(
+      {_: []} as unknown as ArgvStruct,
+      commandFlags,
+      {},
+      {},
+    );
+
+    const initializeTask: AnyObject = pipeline.tasks[0] as AnyObject;
+    const oneShotContext: OneShotSingleDeployContext = {} as OneShotSingleDeployContext;
+    await initializeTask.task(oneShotContext, {} as AnyObject);
+
+    expect(oneShotContext.config.namespace.name).to.equal('rss-hiero-solo-primary-linux-large');
+  });
 });
