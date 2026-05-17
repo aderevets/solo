@@ -237,7 +237,8 @@ export class DefaultOneShotDeployOrchestrator implements OneShotDeployOrchestrat
             if (existingDeployment) {
               const existingNamespace: string = existingDeployment.namespace;
 
-              const isNamespaceProvidedByUser: boolean = typeof argv.namespace === 'string' && argv.namespace.length > 0;
+              const isNamespaceProvidedByUser: boolean =
+                typeof argv.namespace === 'string' && argv.namespace.length > 0;
               if (!isNamespaceProvidedByUser) {
                 config.namespace = NamespaceName.of(existingNamespace);
                 this.configManager.setFlag(flags.namespace, config.namespace);
@@ -511,10 +512,11 @@ export class DefaultOneShotDeployOrchestrator implements OneShotDeployOrchestrat
             }
 
             if (deployConfig.deployRelay) {
-              const existingRelays: unknown[] = this.remoteConfig.configuration.components.getComponentsByClusterReference(
-                ComponentTypes.RelayNodes,
-                deployConfig.clusterRef,
-              );
+              const existingRelays: unknown[] =
+                this.remoteConfig.configuration.components.getComponentsByClusterReference(
+                  ComponentTypes.RelayNodes,
+                  deployConfig.clusterRef,
+                );
               if (existingRelays.length === 0) {
                 const nodeIds: NodeId[] = [];
                 for (const alias of Templates.renderNodeAliasesFromCount(deployConfig.numberOfConsensusNodes, 0)) {
