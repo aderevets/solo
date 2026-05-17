@@ -278,8 +278,27 @@ export class ComponentsDataWrapper implements ComponentsDataWrapperApi {
       );
       component = schemeComponents[0];
     } else {
-      const componentId: ComponentId = Templates.renderComponentIdFromNodeId(nodeId);
-      component = this.getComponentById<BaseStateSchema>(componentType, componentId);
+      if (typeof nodeId === 'number') {
+        const componentId: ComponentId = Templates.renderComponentIdFromNodeId(nodeId);
+        try {
+          component = this.getComponentById<BaseStateSchema>(componentType, componentId);
+        } catch {
+          // Keep idempotent reruns resilient when component IDs drift after interrupted deploys.
+          const componentsByType: BaseStateSchema[] = this.getComponentByType<BaseStateSchema>(componentType);
+          // eslint-disable-next-line unicorn/no-array-sort
+          componentsByType.sort(
+            (componentA: BaseStateSchema, componentB: BaseStateSchema): number =>
+              componentA.metadata.id - componentB.metadata.id,
+          );
+
+          component = componentsByType[nodeId];
+          if (component !== undefined) {
+            logger.warn(
+              `Component id ${componentId} of type ${componentType} not found; using component id ${component.metadata.id} by node index ${nodeId}`,
+            );
+          }
+        }
+      }
     }
 
     if (component === undefined) {

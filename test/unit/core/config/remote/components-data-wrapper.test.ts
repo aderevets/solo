@@ -25,6 +25,9 @@ import {ExplorerStateSchema} from '../../../../../src/data/schema/model/remote/s
 import {BlockNodeStateSchema} from '../../../../../src/data/schema/model/remote/state/block-node-state-schema.js';
 import {DeploymentStateSchema} from '../../../../../src/data/schema/model/remote/deployment-state-schema.js';
 import {RemoteConfigSchema} from '../../../../../src/data/schema/model/remote/remote-config-schema.js';
+import {type K8} from '../../../../../src/integration/kube/k8.js';
+import {type SoloLogger} from '../../../../../src/core/logging/solo-logger.js';
+import {type PodReference} from '../../../../../src/integration/kube/resources/pod/pod-reference.js';
 
 export function createComponentsDataWrapper(): {
   values: {
@@ -210,5 +213,60 @@ describe('ComponentsDataWrapper', () => {
     expect(() => componentsDataWrapper.getComponent<MirrorNodeStateSchema>(type, notFoundComponentId)).to.throw(
       `Component ${notFoundComponentId} of type ${type} not found while attempting to read`,
     );
+  });
+
+  it('should fallback by node index when component id is missing in managePortForward()', async () => {
+    const {
+      wrapper: {componentsDataWrapper},
+      values: {cluster, namespace},
+    } = createComponentsDataWrapper();
+
+    const metadata: ComponentStateMetadataSchema = new ComponentStateMetadataSchema(
+      2,
+      namespace,
+      cluster,
+      DeploymentPhase.DEPLOYED,
+    );
+    componentsDataWrapper.state.haProxies = [new HaProxyStateSchema(metadata)];
+
+    const localPort: number = 50_211;
+    const podPort: number = 50_211;
+    const fakeK8Client: K8 = {
+      pods: (): unknown => ({
+        readByReference: (): unknown => ({
+          portForward: async (): Promise<number> => localPort,
+          stopPortForward: async (): Promise<void> => {},
+        }),
+      }),
+    } as unknown as K8;
+    const fakeLogger: SoloLogger = {
+      showUser: (): void => {},
+      addMessageGroup: (): void => {},
+      addMessageGroupMessage: (): void => {},
+      info: (): void => {},
+      warn: (): void => {},
+    } as unknown as SoloLogger;
+
+    const forwardedPort: number = await componentsDataWrapper.managePortForward(
+      undefined,
+      {} as PodReference,
+      podPort,
+      localPort,
+      fakeK8Client,
+      fakeLogger,
+      ComponentTypes.HaProxy,
+      'Consensus Node gRPC',
+      true,
+      0,
+      true,
+    );
+
+    expect(forwardedPort).to.equal(localPort);
+    expect(componentsDataWrapper.state.haProxies[0].metadata.portForwardConfigs).to.deep.equal([
+      {
+        podPort,
+        localPort,
+      },
+    ]);
   });
 });

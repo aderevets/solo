@@ -960,29 +960,45 @@ export class DeploymentCommand extends BaseCommand {
           return;
         }
 
-        await (existingClusterContext
-          ? this.remoteConfig.createFromExisting(
-              namespace,
-              clusterRef,
-              deployment,
-              this.componentFactory,
-              dnsBaseDomain,
-              dnsConsensusNodePattern,
-              existingClusterContext,
-              argv,
-              nodeAliases,
-            )
-          : this.remoteConfig.create(
-              argv,
-              ledgerPhase,
-              nodeAliases,
-              namespace,
-              deployment,
-              clusterRef,
-              context,
-              dnsBaseDomain,
-              dnsConsensusNodePattern,
-            ));
+        const sourceRemoteConfigExists: boolean =
+          !!existingClusterContext &&
+          ledgerPhase !== LedgerPhase.UNINITIALIZED &&
+          (await this.k8Factory
+            .getK8(existingClusterContext)
+            .configMaps()
+            .exists(namespace, constants.SOLO_REMOTE_CONFIGMAP_NAME));
+
+        if (sourceRemoteConfigExists) {
+          await this.remoteConfig.createFromExisting(
+            namespace,
+            clusterRef,
+            deployment,
+            this.componentFactory,
+            dnsBaseDomain,
+            dnsConsensusNodePattern,
+            existingClusterContext,
+            argv,
+            nodeAliases,
+          );
+        } else {
+          if (existingClusterContext && ledgerPhase !== LedgerPhase.UNINITIALIZED) {
+            this.logger.showUser(
+              `Remote config for deployment: ${deployment} was not found in context: ${existingClusterContext}; creating a new remote config in context: ${context}`,
+            );
+          }
+
+          await this.remoteConfig.create(
+            argv,
+            ledgerPhase,
+            nodeAliases,
+            namespace,
+            deployment,
+            clusterRef,
+            context,
+            dnsBaseDomain,
+            dnsConsensusNodePattern,
+          );
+        }
       },
     };
   }
