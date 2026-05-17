@@ -11,7 +11,7 @@ import 'dotenv/config';
 import {type NodeAlias} from '../types/aliases.js';
 
 export function getEnvironmentVariable(name: string): string | undefined {
-  if (process.env[name]) {
+  if (process.env[name] && process.env[name].trim() !== '') {
     console.log(`>> environment variable '${name}' exists, using its value`);
     return process.env[name];
   }
@@ -36,6 +36,7 @@ export const VFKIT: string = 'vfkit';
 export const GVPROXY: string = 'gvproxy';
 export const DOCKER: string = 'docker';
 export const KUBECTL: string = 'kubectl';
+export const CRANE: string = 'crane';
 export const BASE_DEPENDENCIES: string[] = [HELM, KIND, KUBECTL];
 export const DEFAULT_CLUSTER: string = 'solo-cluster';
 export const RESOURCES_DIR: string = PathEx.joinWithRealPath(ROOT_DIR, 'resources');
@@ -49,6 +50,10 @@ export const KIND_NODE_IMAGE: string =
 export const PODMAN_MACHINE_NAME: string = 'podman-machine-default';
 export const SOLO_DEV_OUTPUT: boolean = Boolean(getEnvironmentVariable('SOLO_DEV_OUTPUT')) || false;
 export const ENABLE_S6_IMAGE: boolean = getEnvironmentVariable('ENABLE_S6_IMAGE') === 'true' || true;
+
+export const CONFIG: {ENABLE_IMAGE_CACHE: boolean} = {
+  ENABLE_IMAGE_CACHE: getEnvironmentVariable('ENABLE_IMAGE_CACHE') === 'true' || false,
+};
 
 export const ROOT_CONTAINER: ContainerName = ContainerName.of('root-container');
 export const SOLO_REMOTE_CONFIGMAP_NAME: string = 'solo-remote-config';
@@ -88,7 +93,7 @@ export const S6_NODE_IMAGE_REPOSITORY: string =
 const ignorePodMetricsEnvironment: string = getEnvironmentVariable('IGNORE_POD_METRICS');
 export const IGNORE_POD_METRICS: string[] = ignorePodMetricsEnvironment
   ? ignorePodMetricsEnvironment.split(',')
-  : ['network-load-generator'];
+  : ['network-load-generator', 'metrics-server'];
 
 export const HEDERA_NODE_SIDECARS: string[] = [
   'recordStreamUploader',
@@ -142,6 +147,13 @@ export const MINIO_OPERATOR_CHART_URL: string =
 export const MINIO_OPERATOR_CHART: string = 'operator';
 export const MINIO_OPERATOR_RELEASE_NAME: string = 'operator';
 
+export const METRICS_SERVER_CHART_URL: string =
+  getEnvironmentVariable('METRICS_SERVER_CHART_URL') ?? 'https://kubernetes-sigs.github.io/metrics-server/';
+export const METRICS_SERVER_CHART: string = 'metrics-server';
+export const METRICS_SERVER_RELEASE_NAME: string = 'metrics-server';
+export const METRICS_SERVER_NAMESPACE: NamespaceName = NamespaceName.of('kube-system');
+export const METRICS_SERVER_INSTALL_ARGS: string = '--set "args[0]=--kubelet-insecure-tls"';
+
 export const EXPLORER_CHART_URL: string =
   getEnvironmentVariable('EXPLORER_CHART_URL') ??
   'oci://ghcr.io/hiero-ledger/hiero-mirror-node-explorer/hiero-explorer-chart';
@@ -193,6 +205,7 @@ export const SOLO_HEDERA_MIRROR_IMPORTER: string[] = [
 // Component label selectors for pod discovery
 export const SOLO_RELAY_NAME_LABEL: string = 'app.kubernetes.io/name=relay';
 export const SOLO_MIRROR_IMPORTER_NAME_LABEL: string = 'app.kubernetes.io/name=importer';
+export const SOLO_MIRROR_PINGER_NAME_LABEL: string = 'app.kubernetes.io/name=pinger';
 export const SOLO_MIRROR_GRPC_NAME_LABEL: string = 'app.kubernetes.io/name=grpc';
 export const SOLO_MIRROR_MONITOR_NAME_LABEL: string = 'app.kubernetes.io/name=monitor';
 export const SOLO_MIRROR_REST_NAME_LABEL: string = 'app.kubernetes.io/name=rest';
@@ -208,6 +221,7 @@ export const DEFAULT_CHART_REPO: Map<string, string> = new Map()
   .set(MIRROR_NODE_RELEASE_NAME, MIRROR_NODE_CHART_URL)
   .set(PROMETHEUS_RELEASE_NAME, PROMETHEUS_STACK_CHART_URL)
   .set(MINIO_OPERATOR_RELEASE_NAME, MINIO_OPERATOR_CHART_URL)
+  .set(METRICS_SERVER_RELEASE_NAME, METRICS_SERVER_CHART_URL)
   .set(INGRESS_CONTROLLER_RELEASE_NAME, INGRESS_CONTROLLER_CHART_URL);
 
 export const MIRROR_INGRESS_CLASS_NAME: string = 'mirror-ingress-class';
@@ -255,6 +269,22 @@ export const BLOCK_NODE_SOLO_DEV_FILE: string = PathEx.joinWithRealPath(RESOURCE
 export const EXPLORER_VALUES_FILE: string = PathEx.joinWithRealPath(RESOURCES_DIR, 'hiero-explorer-values.yaml');
 export const RELAY_VALUES_FILE: string = PathEx.joinWithRealPath(RESOURCES_DIR, 'relay-values.yaml');
 export const MIRROR_NODE_VALUES_FILE: string = PathEx.joinWithRealPath(RESOURCES_DIR, 'mirror-node-values.yaml');
+
+/* vars MIRROR_NODE_OLD_.* can be removed once minimum mirrornode version support is 0.152.0.
+ * These variables will only be applied if the MIRROR_NODE_VERSION < 0.152.0
+ * */
+export const MIRROR_NODE_OLD_IMAGE_REGISTRY: string =
+  getEnvironmentVariable('MIRROR_NODE_OLD_IMAGE_REGISTRY') || 'gcr.io';
+export const MIRROR_NODE_OLD_IMAGE_REPO_ROOT: string =
+  getEnvironmentVariable('MIRROR_NODE_OLD_IMAGE_REPO_ROOT') || 'mirrornode/hedera-mirror-';
+export const MIRROR_NODE_OLD_MEMORY_REST: string = getEnvironmentVariable('MIRROR_NODE_OLD_MEMORY_REST') || '200Mi';
+export const MIRROR_NODE_OLD_MEMORY_RESTJAVA: string =
+  getEnvironmentVariable('MIRROR_NODE_OLD_MEMORY_RESTJAVA') || '500Mi';
+export const MIRROR_NODE_OLD_MEMORY_WEB3: string = getEnvironmentVariable('MIRROR_NODE_OLD_MEMORY_WEB3') || '1000Mi';
+export const MIRROR_NODE_OLD_MEMORY_IMPORTER: string =
+  getEnvironmentVariable('MIRROR_NODE_OLD_MEMORY_IMPORTER') || '2000Mi';
+export const MIRROR_NODE_OLD_MEMORY_GRPC: string = getEnvironmentVariable('MIRROR_NODE_OLD_MEMORY_GRPC') || '1000Mi';
+
 export const MIRROR_NODE_HIKARI_LIMITS_FILE: string = PathEx.joinWithRealPath(
   RESOURCES_DIR,
   'mirror-node-hikari-limits.yaml',
@@ -268,6 +298,10 @@ export const INGRESS_CONTROLLER_VALUES_FILE: string = PathEx.joinWithRealPath(
   'ingress-controller-values.yaml',
 );
 export const BLOCK_NODE_VALUES_FILE: string = PathEx.joinWithRealPath(RESOURCES_DIR, 'block-node-values.yaml');
+export const MIRROR_POSTGRES_TRUNCATE_SQL_FILE: string = PathEx.joinWithRealPath(
+  RESOURCES_DIR,
+  'mirror-postgres-truncate.sql',
+);
 export const UPGRADE_MIGRATIONS_FILE: string = PathEx.join(RESOURCES_DIR, 'component-upgrade-migrations.json');
 export const SOLO_DEPLOYMENT_VALUES_FILE: string = PathEx.joinWithRealPath(RESOURCES_DIR, 'solo-values.yaml');
 export const BLOCK_NODE_TSS_VALUES_FILE: string = PathEx.joinWithRealPath(RESOURCES_DIR, 'block-node-tss-values.yaml');
@@ -277,14 +311,25 @@ export const NODE_LOG_FAILURE_MSG: string = 'failed to download logs from pod';
 export const ONE_SHOT_WITH_BLOCK_NODE: string = getEnvironmentVariable('ONE_SHOT_WITH_BLOCK_NODE') || 'false';
 export const RAPID_FIRE_VALUES_FILE: string = PathEx.joinWithRealPath(RESOURCES_DIR, 'rapid-fire', 'nlg-values.yaml');
 
+export const SOLO_CACHE_IMAGES_TARGET_FILE: string = PathEx.joinWithRealPath(
+  RESOURCES_DIR,
+  'config',
+  'solo-cache-images-target.yaml',
+);
+
 export const CONTAINER_COPY_MAX_ATTEMPTS: number = +getEnvironmentVariable('CONTAINER_COPY_MAX_ATTEMPTS') || 3;
 export const CONTAINER_COPY_BACKOFF_MS: number = +getEnvironmentVariable('CONTAINER_COPY_BACKOFF_MS') || 300;
+
+export const CHECK_WRAPS_DIRECTORY_MAX_ATTEMPTS: number =
+  +getEnvironmentVariable('CHECK_WRAPS_DIRECTORY_MAX_ATTEMPTS') || 10;
+export const CHECK_WRAPS_DIRECTORY_BACKOFF_MS: number =
+  +getEnvironmentVariable('CHECK_WRAPS_DIRECTORY_BACKOFF_MS') || 2000;
 
 /**
  * Listr related
  * @returns a object that defines the default color options
  */
-export const LISTR_DEFAULT_RENDERER_TIMER_OPTION = {
+export const LISTR_DEFAULT_RENDERER_TIMER_OPTION: any = {
   ...PRESET_TIMER,
   condition: (duration: number): boolean => duration > 100,
   format: (duration: number) => {
@@ -393,7 +438,7 @@ export const PODS_READY_DELAY: number = +getEnvironmentVariable('PODS_READY_DELA
 export const RELAY_PODS_RUNNING_MAX_ATTEMPTS: number =
   +getEnvironmentVariable('RELAY_PODS_RUNNING_MAX_ATTEMPTS') || 900;
 export const RELAY_PODS_RUNNING_DELAY: number = +getEnvironmentVariable('RELAY_PODS_RUNNING_RUNNING_DELAY') || 1000;
-export const RELAY_PODS_READY_MAX_ATTEMPTS: number = +getEnvironmentVariable('RELAY_PODS_READY_MAX_ATTEMPTS') || 300;
+export const RELAY_PODS_READY_MAX_ATTEMPTS: number = +getEnvironmentVariable('RELAY_PODS_READY_MAX_ATTEMPTS') || 100;
 export const RELAY_PODS_READY_DELAY: number = +getEnvironmentVariable('RELAY_PODS_READY_DELAY') || 1000;
 export const BLOCK_NODE_PODS_RUNNING_MAX_ATTEMPTS: number =
   +getEnvironmentVariable('BLOCK_NODE_PODS_RUNNING_MAX_ATTEMPTS') || 900;
@@ -445,6 +490,7 @@ export const BLOCK_STREAM_STREAM_MODE: string = getEnvironmentVariable('BLOCK_ST
 export const BLOCK_STREAM_WRITER_MODE: string = getEnvironmentVariable('BLOCK_STREAM_WRITER_MODE') || 'FILE_AND_GRPC';
 
 export const BLOCK_NODE_IMAGE_NAME: string = 'block-node-server';
+export const APPLICATION_PROPERTIES: string = 'application.properties';
 export const BLOCK_NODES_JSON_FILE: string = 'block-nodes.json';
 export const NETWORK_NODE_SHARED_DATA_CONFIG_MAP_NAME: string = 'network-node-data-config-cm';
 export const enum StorageType {

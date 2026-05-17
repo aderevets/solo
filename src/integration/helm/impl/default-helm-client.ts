@@ -33,6 +33,7 @@ import {SoloError} from '../../../core/errors/solo-error.js';
 import {RepositoryUpdateRequest} from '../request/repository/repository-update-request.js';
 import path from 'node:path';
 import {SemanticVersion} from '../../../business/utils/semantic-version.js';
+import {ChartPullRequest} from '../request/chart/chart-pull-request.js';
 
 type BiFunction<T, U, R> = (t: T, u: U) => R;
 
@@ -111,13 +112,8 @@ export class DefaultHelmClient implements HelmClient {
     await this.executeAsync(new ChartTestRequest(releaseName, options));
   }
 
-  public async listReleases(
-    allNamespaces: boolean,
-    namespace?: string,
-    kubeContext?: string,
-    includeAll: boolean = false,
-  ): Promise<ReleaseItem[]> {
-    return this.executeAsList(new ReleaseListRequest(allNamespaces, namespace, kubeContext, includeAll), ReleaseItem);
+  public async listReleases(allNamespaces: boolean, namespace?: string, kubeContext?: string): Promise<ReleaseItem[]> {
+    return this.executeAsList(new ReleaseListRequest(allNamespaces, namespace, kubeContext), ReleaseItem);
   }
 
   public async dependencyUpdate(chartName: string): Promise<void> {
@@ -223,5 +219,9 @@ export class DefaultHelmClient implements HelmClient {
 
   public async updateRepositories(): Promise<void> {
     await this.executeAsync(new RepositoryUpdateRequest());
+  }
+
+  public async pullChartPackage(chart: Chart, version: string, destinationDirectory: string): Promise<void> {
+    await this.executeAsync(new ChartPullRequest(chart, version, destinationDirectory));
   }
 }

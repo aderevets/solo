@@ -6,8 +6,6 @@ import {type Lock} from './lock.js';
 import {LockAcquisitionError} from './lock-acquisition-error.js';
 import {type SoloListrTaskWrapper} from '../../types/index.js';
 import {DEFAULT_LOCK_ACQUIRE_ATTEMPTS} from '../constants.js';
-import {sleep} from '../helpers.js';
-import {Duration} from '../time/duration.js';
 
 /**
  * A utility class for managing lock acquisition tasks in Listr2 based workflows.
@@ -101,12 +99,12 @@ export class ListrLock {
           `, attempt: ${chalk.cyan((attempt + 1).toString())}/${chalk.cyan(maxAttempts.toString())}`;
         return;
       } catch (error: LockAcquisitionError | any) {
-        innerError = error;
-        if (attempt < maxAttempts - 1) {
-          task.title =
-            `${title} - ${chalk.gray(`lock exists, attempting again in ${lock.durationSeconds} seconds`)}` +
-            `, attempt: ${chalk.cyan((attempt + 1).toString())}/${chalk.cyan(maxAttempts.toString())}`;
-          await sleep(Duration.ofSeconds(lock.durationSeconds));
+        task.title =
+          `${title} - ${chalk.gray(`lock exists, attempting again in ${lock.durationSeconds} seconds`)}` +
+          `, attempt: ${chalk.cyan((attempt + 1).toString())}/${chalk.cyan(maxAttempts.toString())}`;
+
+        if (attempt >= maxAttempts) {
+          innerError = error;
         }
       }
     }

@@ -25,19 +25,7 @@ export class K8ClientManifests implements Manifests {
         continue;
       }
 
-      try {
-        await this.k8sObjectApi.create(document);
-      } catch (error: unknown) {
-        // HTTP 409 means the resource already exists — treat as success (idempotent apply).
-        // This can happen when a previous interrupted deployment already created the CRD,
-        // or when concurrent tasks race to create the same resource.
-        // The @kubernetes/client-node ApiException stores the HTTP status in .code,
-        // not in .response.statusCode.
-        if ((error as {code?: number})?.code === 409) {
-          continue;
-        }
-        throw error;
-      }
+      await this.k8sObjectApi.create(document);
     }
   }
 
@@ -53,6 +41,48 @@ export class K8ClientManifests implements Manifests {
       undefined,
       undefined,
       PatchStrategy.MergePatch,
+    );
+  }
+
+  public async scaleStatefulSet(namespace: string, statefulSetName: string, replicas: number): Promise<void> {
+    await this.k8sObjectApi.patch(
+      {
+        apiVersion: 'apps/v1',
+        kind: 'StatefulSet',
+        metadata: {
+          namespace,
+          name: statefulSetName,
+        },
+        spec: {
+          replicas,
+        },
+      } as KubernetesObject,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      PatchStrategy.StrategicMergePatch,
+    );
+  }
+
+  public async scaleDeployment(namespace: string, deploymentName: string, replicas: number): Promise<void> {
+    await this.k8sObjectApi.patch(
+      {
+        apiVersion: 'apps/v1',
+        kind: 'Deployment',
+        metadata: {
+          namespace,
+          name: deploymentName,
+        },
+        spec: {
+          replicas,
+        },
+      } as KubernetesObject,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      PatchStrategy.StrategicMergePatch,
     );
   }
 }

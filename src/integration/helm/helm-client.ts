@@ -98,12 +98,7 @@ export interface HelmClient {
    * @param kubeContext
    * @returns the list of releases.
    */
-  listReleases(
-    allNamespaces: boolean,
-    namespace?: string,
-    kubeContext?: string,
-    includeAll?: boolean,
-  ): Promise<ReleaseItem[]>;
+  listReleases(allNamespaces: boolean, namespace?: string, kubeContext?: string): Promise<ReleaseItem[]>;
 
   /**
    * Executes the Helm CLI dependency update sub-command and updates the dependencies of the specified Helm
@@ -112,4 +107,11 @@ export interface HelmClient {
    * @param chartName the name of the chart to update.
    */
   dependencyUpdate(chartName: string): Promise<void>;
+
+  /**
+   * @param chart - the chart to pull
+   * @param version - the version of the chart to pull
+   * @param destinationDirectory - the directory to pull the chart to
+   */
+  pullChartPackage(chart: Chart, version: string, destinationDirectory: string): Promise<void>;
 }

@@ -12,7 +12,6 @@ import * as constants from '../core/constants.js';
 import {getEnvironmentVariable} from '../core/constants.js';
 import {Templates} from '../core/templates.js';
 import {
-  addDebugOptions,
   addRootImageValues,
   createAndCopyBlockNodeJsonFileForConsensusNode,
   parseNodeAliases,
@@ -21,6 +20,8 @@ import {
   showVersionBanner,
   sleep,
 } from '../core/helpers.js';
+import {helmValuesHelper} from '../core/helm-values-helper.js';
+import {type PerNodeIdentity} from '../types/helm-values.js';
 import {resolveNamespaceFromDeployment} from '../core/resolvers.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -28,14 +29,7 @@ import {type KeyManager} from '../core/key-manager.js';
 import {type PlatformInstaller} from '../core/platform-installer.js';
 import {type ProfileManager} from '../core/profile-manager.js';
 import {type CertificateManager} from '../core/certificate-manager.js';
-import {
-  type AnyListrContext,
-  type ArgvStruct,
-  type IP,
-  type NodeAlias,
-  type NodeAliases,
-  type NodeId,
-} from '../types/aliases.js';
+import {type AnyListrContext, type ArgvStruct, type IP, type NodeAlias, type NodeAliases} from '../types/aliases.js';
 import {ListrLock} from '../core/lock/listr-lock.js';
 import {v4 as uuidv4} from 'uuid';
 import {
@@ -72,7 +66,6 @@ import {PvcReference} from '../integration/kube/resources/pvc/pvc-reference.js';
 import {NamespaceName} from '../types/namespace/namespace-name.js';
 import {ConsensusNode} from '../core/model/consensus-node.js';
 import {BlockNodeStateSchema} from '../data/schema/model/remote/state/block-node-state-schema.js';
-import {BaseStateSchema} from '../data/schema/model/remote/state/base-state-schema.js';
 import {SemanticVersion} from '../business/utils/semantic-version.js';
 import {Secret} from '../integration/kube/resources/secret/secret.js';
 import * as versions from '../../version.js';
@@ -420,7 +413,7 @@ export class NetworkCommand extends BaseCommand {
     const applicationPropertiesPath: string = PathEx.joinWithRealPath(
       config.cacheDir,
       'templates',
-      'application.properties',
+      constants.APPLICATION_PROPERTIES,
     );
 
     const jfrFilePath: string = config.javaFlightRecorderConfiguration;
@@ -428,7 +421,6 @@ export class NetworkCommand extends BaseCommand {
       jfrFilePath === '' ? '' : jfrFilePath.slice(Math.max(0, jfrFilePath.lastIndexOf(path.sep) + 1));
     this.profileValuesFile = await this.profileManager.prepareValuesForSoloChart(
       config.consensusNodes,
-      config.domainNamesMapping,
       deploymentName,
       applicationPropertiesPath,
       jfrFile,
@@ -450,10 +442,106 @@ export class NetworkCommand extends BaseCommand {
       [constants.SOLO_DEPLOYMENT_VALUES_FILE],
     );
 
+    // Generate per-cluster extraEnv values files to avoid passing the global node list to every
+    // cluster's Helm upgrade (in multi-cluster deployments each cluster has its own node subset).
+    // Each file carries only the nodes that belong to the target cluster, preventing Helm's
+    // array-replacement semantics from inserting nodes from other clusters.
+    const perClusterExtraEnvironmentValuesFiles: Record<ClusterReferenceName, string> = {};
+    const needsExtraEnvironment: boolean =
+      config.wrapsEnabled || !!config.debugNodeAlias || config.app !== constants.HEDERA_APP_NAME; // JAVA_MAIN_CLASS for tools/local builds
+
+    if (needsExtraEnvironment) {
+      const realm: Realm = this.localConfig.configuration.realmForDeployment(config.deployment);
+      const shard: Shard = this.localConfig.configuration.shardForDeployment(config.deployment);
+
+      for (const clusterReference of Object.keys(valuesFiles)) {
+        // Only include nodes belonging to this cluster so the generated hedera.nodes array
+        // matches the cluster-specific node set and does not overwrite nodes in other clusters.
+        // Sort deterministically by nodeId so per-node Helm values align with the chart's
+        // expected node ordering regardless of upstream object iteration order.
+        const clusterConsensusNodes: ConsensusNode[] = config.consensusNodes
+          .filter((node): boolean => node.cluster === clusterReference)
+          // eslint-disable-next-line unicorn/no-array-sort
+          .sort((left, right): number => left.nodeId - right.nodeId);
+        if (clusterConsensusNodes.length === 0) {
+          continue;
+        }
+
+        const additionalNodeValues: Record<
+          NodeAlias,
+          {name: NodeAlias; nodeId: number; accountId: string; blockNodesJson?: string}
+        > = {};
+
+        // Preserve blockNodesJson from the per-cluster profile values file so that it is not
+        // silently dropped when the extraEnv values file replaces the hedera.nodes array.
+        const clusterProfileValuesFile: string | undefined = this.profileValuesFile?.[clusterReference];
+        const nodeIdentityMap: Record<NodeAlias, PerNodeIdentity> = clusterProfileValuesFile
+          ? helmValuesHelper.extractPerNodeIdentityFromValuesFile(clusterProfileValuesFile, clusterConsensusNodes)
+          : {};
+        const blockNodesJsonMap: Record<NodeAlias, string> = clusterProfileValuesFile
+          ? helmValuesHelper.extractPerNodeBlockNodesJsonFromValuesFile(clusterProfileValuesFile, clusterConsensusNodes)
+          : {};
+
+        for (const consensusNode of clusterConsensusNodes) {
+          const identity: PerNodeIdentity = nodeIdentityMap[consensusNode.name] ?? {};
+          additionalNodeValues[consensusNode.name] = {
+            name: identity.name ?? consensusNode.name,
+            nodeId: identity.nodeId ?? consensusNode.nodeId,
+            // Prefer the accountId recorded in the profile values file (set by the account
+            // manager using the deployment's configured start account ID) over the computed
+            // default, so custom account IDs assigned via node transactions are preserved.
+            accountId:
+              identity.accountId ?? `${shard}.${realm}.${constants.DEFAULT_START_ID_NUMBER + consensusNode.nodeId}`,
+          };
+          if (blockNodesJsonMap[consensusNode.name]) {
+            additionalNodeValues[consensusNode.name].blockNodesJson = blockNodesJsonMap[consensusNode.name];
+          }
+        }
+
+        // Collect extraEnv entries already present in this cluster's values files so that the
+        // generated file can include them and avoid Helm array replacement silently dropping
+        // env vars set by user-provided values files.
+        const existingValuesFilePaths: string[] = helmValuesHelper.parseValuesFilePaths(valuesFiles[clusterReference]);
+
+        const clusterExtraEnvironmentValuesFile: string = helmValuesHelper.generateExtraEnvironmentValuesFile(
+          clusterConsensusNodes,
+          {
+            wrapsEnabled: config.wrapsEnabled,
+            tss: this.soloConfig.tss,
+            debugNodeAlias: config.debugNodeAlias,
+            useJavaMainClass: config.app !== constants.HEDERA_APP_NAME,
+            additionalNodeValues,
+            baseExtraEnvironmentVariables: helmValuesHelper.extractExtraEnvironmentFromValuesFiles(
+              existingValuesFilePaths,
+              clusterConsensusNodes,
+            ),
+          },
+          config.cacheDir,
+        );
+
+        perClusterExtraEnvironmentValuesFiles[clusterReference] = clusterExtraEnvironmentValuesFile;
+        this.logger.debug(
+          `Created per-cluster extraEnv values file for ${clusterReference}: ${clusterExtraEnvironmentValuesFile}`,
+        );
+      }
+    }
+
     for (const clusterReference of Object.keys(valuesFiles)) {
-      valuesArgumentMap[clusterReference] = valuesArguments[clusterReference] + valuesFiles[clusterReference];
+      // Keep --set flags last so they override values files. This is critical when we also
+      // provide per-node extraEnv via a values file (e.g. --debug-node-alias), because a later
+      // values file can replace array elements and drop fields like node labels/account IDs.
+      let valuesArgument: string = valuesFiles[clusterReference];
+
+      // Add per-cluster extraEnv values file if any extraEnv customizations are needed
+      if (perClusterExtraEnvironmentValuesFiles[clusterReference]) {
+        valuesArgument += ` --values "${perClusterExtraEnvironmentValuesFiles[clusterReference]}"`;
+      }
+
+      valuesArgument += valuesArguments[clusterReference];
+
+      valuesArgumentMap[clusterReference] = valuesArgument;
       this.logger.debug(`Prepared helm chart values for cluster-ref: ${clusterReference}`, {
-        valuesArg: valuesArgumentMap,
+        valuesArgument: valuesArgumentMap[clusterReference],
       });
     }
 
@@ -467,7 +555,6 @@ export class NetworkCommand extends BaseCommand {
   private prepareValuesArg(config: NetworkDeployConfigClass): Record<ClusterReferenceName, string> {
     const valuesArguments: Record<ClusterReferenceName, string> = {};
     const clusterReferences: ClusterReferenceName[] = [];
-    let extraEnvironmentIndex: number = 0;
 
     // initialize the valueArgs
     for (const consensusNode of config.consensusNodes) {
@@ -476,50 +563,15 @@ export class NetworkCommand extends BaseCommand {
         clusterReferences.push(consensusNode.cluster);
       }
 
-      // set the extraEnv settings on the nodes for running with a local build or tool
-      if (config.app === constants.HEDERA_APP_NAME) {
-        // make sure each cluster has an empty string for the valuesArg
+      // Initialize empty valuesArg for each cluster
+      // All extraEnv logic (JAVA_MAIN_CLASS, TSS wraps, debug) is now handled via values files
+      if (!valuesArguments[consensusNode.cluster]) {
         valuesArguments[consensusNode.cluster] = '';
-      } else {
-        let valuesArgument: string = valuesArguments[consensusNode.cluster] ?? '';
-        valuesArgument += ` --set "hedera.nodes[${consensusNode.nodeId}].root.extraEnv[0].name=JAVA_MAIN_CLASS"`;
-        valuesArgument += ` --set "hedera.nodes[${consensusNode.nodeId}].root.extraEnv[0].value=com.swirlds.platform.Browser"`;
-        valuesArguments[consensusNode.cluster] = valuesArgument;
-
-        extraEnvironmentIndex = 1; // used to add the debug options when using a tool or local build of hedera
       }
     }
 
-    if (config.wrapsEnabled) {
-      for (const consensusNode of config.consensusNodes) {
-        const cluster: ClusterReferenceName = consensusNode.cluster;
-        const index: number = extraEnvironmentIndex;
-        const nodeId: NodeId = consensusNode.nodeId;
-
-        valuesArguments[cluster] +=
-          ` --set "hedera.nodes[${nodeId}].root.extraEnv[${index}].name=TSS_LIB_WRAPS_ARTIFACTS_PATH"`;
-
-        const wraps: Wraps = this.soloConfig.tss.wraps;
-        const path: string = `${constants.HEDERA_HAPI_PATH}/${wraps.artifactsFolderName}`;
-
-        valuesArguments[cluster] += ` --set "hedera.nodes[${nodeId}].root.extraEnv[${index}].value=${path}"`;
-      }
-
-      extraEnvironmentIndex = 2;
-    }
-
-    // add debug options to the debug node
-    for (const consensusNode of config.consensusNodes) {
-      if (consensusNode.name !== config.debugNodeAlias) {
-        continue;
-      }
-
-      valuesArguments[consensusNode.cluster] = addDebugOptions(
-        valuesArguments[consensusNode.cluster],
-        config.debugNodeAlias,
-        extraEnvironmentIndex,
-      );
-    }
+    // All extraEnv customizations (wraps, debug, JAVA_MAIN_CLASS) are handled
+    // via generateExtraEnvironmentValuesFile() in prepareValuesArgMap() to avoid Helm --set replacement issues
 
     if (
       config.storageType === constants.StorageType.AWS_AND_GCS ||
@@ -597,34 +649,32 @@ export class NetworkCommand extends BaseCommand {
       }
     }
 
-    if (constants.ENABLE_S6_IMAGE) {
-      const nodeIndexByClusterAndName: Map<string, number> = new Map();
-      const nextNodeIndexByCluster: Map<ClusterReferenceName, number> = new Map();
-      for (const consensusNode of config.consensusNodes) {
-        const nodeIndex: number = nextNodeIndexByCluster.get(consensusNode.cluster) ?? 0;
-        nextNodeIndexByCluster.set(consensusNode.cluster, nodeIndex + 1);
-        nodeIndexByClusterAndName.set(`${consensusNode.cluster}:${consensusNode.name}`, nodeIndex);
+    const nodeIndexByClusterAndName: Map<string, number> = new Map();
+    const nextNodeIndexByCluster: Map<ClusterReferenceName, number> = new Map();
+    for (const consensusNode of config.consensusNodes) {
+      const nodeIndex: number = nextNodeIndexByCluster.get(consensusNode.cluster) ?? 0;
+      nextNodeIndexByCluster.set(consensusNode.cluster, nodeIndex + 1);
+      nodeIndexByClusterAndName.set(`${consensusNode.cluster}:${consensusNode.name}`, nodeIndex);
+    }
+
+    for (const consensusNode of config.consensusNodes) {
+      const nodeIndex: number | undefined = nodeIndexByClusterAndName.get(
+        `${consensusNode.cluster}:${consensusNode.name}`,
+      );
+      if (nodeIndex === undefined) {
+        continue;
       }
 
-      for (const consensusNode of config.consensusNodes) {
-        const nodeIndex: number | undefined = nodeIndexByClusterAndName.get(
-          `${consensusNode.cluster}:${consensusNode.name}`,
-        );
-        if (nodeIndex === undefined) {
-          continue;
-        }
-
-        let valuesArgument: string = valuesArguments[consensusNode.cluster] ?? '';
-        valuesArgument += ` --set "hedera.nodes[${nodeIndex}].name=${consensusNode.name}"`;
-        valuesArgument = addRootImageValues(
-          valuesArgument,
-          `hedera.nodes[${nodeIndex}]`,
-          constants.S6_NODE_IMAGE_REGISTRY,
-          constants.S6_NODE_IMAGE_REPOSITORY,
-          versions.S6_NODE_IMAGE_VERSION,
-        );
-        valuesArguments[consensusNode.cluster] = valuesArgument;
-      }
+      let valuesArgument: string = valuesArguments[consensusNode.cluster] ?? '';
+      valuesArgument += ` --set "hedera.nodes[${nodeIndex}].name=${consensusNode.name}"`;
+      valuesArgument = addRootImageValues(
+        valuesArgument,
+        `hedera.nodes[${nodeIndex}]`,
+        constants.S6_NODE_IMAGE_REGISTRY,
+        constants.S6_NODE_IMAGE_REPOSITORY,
+        versions.S6_NODE_IMAGE_VERSION,
+      );
+      valuesArguments[consensusNode.cluster] = valuesArgument;
     }
 
     for (const clusterReference of clusterReferences) {
@@ -656,9 +706,12 @@ export class NetworkCommand extends BaseCommand {
     );
 
     if (config.resolvedThrottlesFile) {
+      // repairing the path, this avoid helm failing when running on windows
+      const throttlesFilePath: string = config.resolvedThrottlesFile.replaceAll('\\', '/');
+
       for (const clusterReference of clusterReferences) {
         valuesArguments[clusterReference] +=
-          ` --set-file "hedera.configMaps.genesisThrottlesJson=${config.resolvedThrottlesFile}"`;
+          ` --set-file "hedera.configMaps.genesisThrottlesJson=${throttlesFilePath}"`;
       }
     }
 
@@ -998,10 +1051,6 @@ export class NetworkCommand extends BaseCommand {
     return await this.k8Factory.getK8(context).crds().ifExists(crdName);
   }
 
-  private async crdIsEstablished(context: string, crdName: string): Promise<boolean> {
-    return await this.k8Factory.getK8(context).crds().isEstablished(crdName);
-  }
-
   /**
    * Ensure the PodLogs CRD from Grafana Alloy is installed
    */
@@ -1021,6 +1070,13 @@ export class NetworkCommand extends BaseCommand {
     const CRD_URL: string =
       `https://api.github.com/repos/grafana/alloy/contents/${CRD_FILE_PATH}` +
       `?ref=${versions.GRAFANA_PODLOGS_CRD_VERSION}`;
+    const CRD_RAW_URL: string = `https://raw.githubusercontent.com/grafana/alloy/${versions.GRAFANA_PODLOGS_CRD_VERSION}/${CRD_FILE_PATH}`;
+    const LOCAL_CRD_FILE: string = PathEx.join(
+      constants.ROOT_DIR,
+      'resources',
+      'crds',
+      `monitoring.grafana.com_podlogs-${versions.GRAFANA_PODLOGS_CRD_VERSION}.yaml`,
+    );
 
     for (const context of contexts as string[]) {
       const exists: boolean = await this.crdExists(context, PODLOGS_CRD);
@@ -1042,44 +1098,48 @@ export class NetworkCommand extends BaseCommand {
       // ensuring we only make one network request per job even if multiple contexts need
       // the CRD installed.
       if (!fs.existsSync(temporaryFile)) {
-        // The GitHub Contents API returns a JSON envelope; the file content is base64-encoded
-        // inside the "content" field.  We request application/vnd.github.v3+json so the
-        // response is always the metadata+content JSON object rather than the raw bytes
-        // (the raw media type bypasses the API rate-limit accounting we want).
-        const headers: Record<string, string> = {Accept: 'application/vnd.github.v3+json'};
-        if (process.env.GITHUB_TOKEN) {
-          headers['Authorization'] = `Bearer ${process.env.GITHUB_TOKEN}`;
-        }
-        const response: Response = await fetch(CRD_URL, {headers});
+        // Prefer a vendored CRD file to avoid external network/rate-limit failures in CI.
+        if (fs.existsSync(LOCAL_CRD_FILE)) {
+          fs.copyFileSync(LOCAL_CRD_FILE, temporaryFile);
+          this.logger.debug(`Using local PodLogs CRD file: ${LOCAL_CRD_FILE}`);
+        } else {
+          const downloadErrors: string[] = [];
 
-        if (!response.ok) {
-          throw new Error(`Failed to download CRD YAML: ${response.status} ${response.statusText}`);
-        }
+          // Attempt #1: GitHub Contents API.
+          // The response is a JSON envelope with base64 content.
+          const apiHeaders: Record<string, string> = {Accept: 'application/vnd.github.v3+json'};
+          if (process.env.GITHUB_TOKEN) {
+            apiHeaders['Authorization'] = `Bearer ${process.env.GITHUB_TOKEN}`;
+          }
+          const apiResponse: Response = await fetch(CRD_URL, {headers: apiHeaders});
 
-        // The "content" field contains the file's base64 content with newline characters
-        // inserted every 60 characters by GitHub.  Strip all whitespace before decoding
-        // so Buffer.from() receives a clean base64 string.
-        const json: {content: string} = (await response.json()) as {content: string};
-        const yamlContent: string = Buffer.from(json.content.replaceAll(/\s/g, ''), 'base64').toString('utf8');
-        fs.writeFileSync(temporaryFile, yamlContent, 'utf8');
+          if (apiResponse.ok) {
+            const json: {content: string} = (await apiResponse.json()) as {content: string};
+            const yamlContent: string = Buffer.from(json.content.replaceAll(/\s/g, ''), 'base64').toString('utf8');
+            fs.writeFileSync(temporaryFile, yamlContent, 'utf8');
+          } else {
+            const apiError: string = `${apiResponse.status} ${apiResponse.statusText}`.trim();
+            downloadErrors.push(`GitHub API: ${apiError}`);
+            this.logger.warn(`Failed to download PodLogs CRD from GitHub API (${apiError}), trying raw URL fallback.`);
+
+            // Attempt #2: raw.githubusercontent.com fallback.
+            const rawHeaders: Record<string, string> = {};
+            if (process.env.GITHUB_TOKEN) {
+              rawHeaders['Authorization'] = `Bearer ${process.env.GITHUB_TOKEN}`;
+            }
+            const rawResponse: Response = await fetch(CRD_RAW_URL, {headers: rawHeaders});
+            if (!rawResponse.ok) {
+              const rawError: string = `${rawResponse.status} ${rawResponse.statusText}`.trim();
+              downloadErrors.push(`Raw URL: ${rawError}`);
+              throw new Error(`Failed to download CRD YAML (${downloadErrors.join('; ')})`);
+            }
+            const yamlContent: string = await rawResponse.text();
+            fs.writeFileSync(temporaryFile, yamlContent, 'utf8');
+          }
+        }
       }
 
       await this.k8Factory.getK8(context).manifests().applyManifest(temporaryFile);
-
-      // Wait for the CRD to be established before continuing.  The API server must
-      // register the PodLogs API group before the solo-deployment chart can create
-      // PodLogs CRs (crs.podLog.enabled=true).
-      const PODLOGS_WAIT_TIMEOUT_MS: number = 60_000;
-      const PODLOGS_POLL_INTERVAL_MS: number = 2000;
-      const podlogsDeadline: number = Date.now() + PODLOGS_WAIT_TIMEOUT_MS;
-      this.logger.info(`Waiting for CRD '${PODLOGS_CRD}' to be established in context ${context}...`);
-      while (!(await this.crdIsEstablished(context, PODLOGS_CRD))) {
-        if (Date.now() >= podlogsDeadline) {
-          throw new SoloError(`Timed out waiting for CRD '${PODLOGS_CRD}' to be established in context '${context}'`);
-        }
-        await sleep(Duration.ofMillis(PODLOGS_POLL_INTERVAL_MS));
-      }
-      this.logger.info(`CRD '${PODLOGS_CRD}' is now established in context ${context}`);
     }
   }
 
@@ -1109,18 +1169,18 @@ export class NetworkCommand extends BaseCommand {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     for (const [_, context] of clusterRefs) {
       let valuesArgument: string = '';
-      const missingCrds: string[] = [];
+      let missingCount: number = 0;
 
       for (const {key, crd} of CRDS) {
         const exists: boolean = await this.crdExists(context, crd);
         if (exists) {
           valuesArgument += ` --set "${key}.enabled=false"`;
         } else {
-          missingCrds.push(crd);
+          missingCount++;
         }
       }
 
-      if (missingCrds.length === 0) {
+      if (missingCount === 0) {
         this.logger.info(`All Prometheus Operator CRDs already present in context ${context}; skipping installation.`);
         continue;
       }
@@ -1140,34 +1200,6 @@ export class NetworkCommand extends BaseCommand {
         valuesArgument,
         context,
       );
-
-      // Helm returning successfully only means the CRD objects were created as Kubernetes
-      // resources.  The API server may take a few seconds to register the new API group/version
-      // (propagate the CRDs) so that custom resources of those kinds can actually be created.
-      // Poll until all newly installed CRDs are queryable before proceeding, because the next
-      // step (solo-deployment install) has a post-install hook that creates a ServiceMonitor CR.
-      this.logger.info(
-        `Waiting for ${missingCrds.length} Prometheus Operator CRD(s) to be registered in context ${context}...`,
-      );
-      const CRD_WAIT_TIMEOUT_MS: number = 120_000;
-      const CRD_POLL_INTERVAL_MS: number = 2000;
-      const deadline: number = Date.now() + CRD_WAIT_TIMEOUT_MS;
-      for (const crdName of missingCrds) {
-        // Wait for the Established condition, not just object existence.  The API server
-        // needs to register the new API group/version before CRs of that kind can be
-        // created — creating the CRD object and the group becoming available are two
-        // separate steps, and ifExists() only detects the former.
-        while (!(await this.crdIsEstablished(context, crdName))) {
-          if (Date.now() >= deadline) {
-            throw new SoloError(
-              `Timed out waiting for CRD '${crdName}' to be registered in context '${context}' after ${CRD_WAIT_TIMEOUT_MS / 1000}s`,
-            );
-          }
-          await sleep(Duration.ofMillis(CRD_POLL_INTERVAL_MS));
-        }
-        this.logger.debug(`CRD '${crdName}' is now established in context '${context}'`);
-      }
-      this.logger.info(`All Prometheus Operator CRDs are now registered in context ${context}`);
 
       this.eventBus.emit(new NetworkDeployedEvent(deployment));
 
@@ -1264,6 +1296,9 @@ export class NetworkCommand extends BaseCommand {
             this.remoteConfig.configuration.state.wrapsEnabled = wrapsEnabled;
 
             if (wrapsEnabled && new SemanticVersion<string>(currentVersion).lessThan(minimumVersion)) {
+              this.logger.showUser(
+                `Consensus node version ${currentVersion} does not support TSS or Wraps. Please upgrade to version ${minimumVersion} or later to enable these features.`,
+              );
               throw new SoloError(
                 `"--wraps" requires consensus node >= ${versions.MINIMUM_HIERO_PLATFORM_VERSION_FOR_TSS}`,
               );
@@ -1364,68 +1399,6 @@ export class NetworkCommand extends BaseCommand {
                 clusterRefs.get(clusterReference),
               );
               if (isInstalled) {
-                if (this.oneShotState.isActive()) {
-                  // In one-shot recovery mode the chart may be in a pending-install or
-                  // pending-upgrade state if SIGKILL hit during a prior Helm operation.
-                  // A pending release cannot be upgraded ("another operation is in progress"),
-                  // so uninstall it first and fall through to the fresh install below.
-                  const isPending: boolean = await this.chartManager.isChartPending(
-                    namespace,
-                    constants.SOLO_DEPLOYMENT_CHART,
-                    clusterRefs.get(clusterReference),
-                  );
-                  if (isPending) {
-                    this.logger.info(
-                      `Chart '${constants.SOLO_DEPLOYMENT_CHART}' is in pending state; uninstalling for recovery`,
-                    );
-                    await this.chartManager.uninstall(
-                      namespace,
-                      constants.SOLO_DEPLOYMENT_CHART,
-                      clusterRefs.get(clusterReference),
-                    );
-                  } else {
-                    // Chart is already cleanly installed.  Skip both the uninstall and the
-                    // upgrade: helm upgrade --reuse-values still causes a StatefulSet
-                    // rolling-restart (even when values are identical) which tears down the
-                    // running consensus-node pod.  Because node-setup needs to copy platform
-                    // software into that pod, the restart causes a race where the pod
-                    // disappears between identifyNetworkPods and copyTo, producing an
-                    // "Invalid pod network-node1-0" error.  Simply leave the already-installed
-                    // chart in place and proceed.
-                    config.isUpgrade = true;
-                    config.soloChartVersion = SemanticVersion.getValidSemanticVersion(
-                      config.soloChartVersion,
-                      false,
-                      'Solo chart version',
-                    );
-                    showVersionBanner(this.logger, constants.SOLO_DEPLOYMENT_CHART, config.soloChartVersion);
-
-                    // If any consensus node is still in the REQUESTED phase it was never set
-                    // up.  The pod started without platform software and may be crash-looping,
-                    // which would prevent node-setup from succeeding.  Delete every
-                    // network-node pod now so the StatefulSet recreates clean pods before
-                    // node-setup runs.  Pods whose nodes have already been set up
-                    // (CONFIGURED / STARTED / ACTIVE) are not affected because that phase is
-                    // only reached after a successful node-setup run.
-                    const anyUnsetupNode: boolean = this.remoteConfig.configuration.components
-                      .getComponentByType<BaseStateSchema>(ComponentTypes.ConsensusNode)
-                      .some((node: BaseStateSchema): boolean => node.metadata.phase === DeploymentPhase.REQUESTED);
-
-                    if (anyUnsetupNode) {
-                      const k8: K8 = this.k8Factory.getK8(clusterRefs.get(clusterReference));
-                      const networkNodePods: Pod[] = await k8
-                        .pods()
-                        .list(namespace, ['solo.hedera.com/type=network-node']);
-                      for (const pod of networkNodePods) {
-                        await k8.pods().readByReference(pod.podReference).killPod();
-                      }
-                    }
-
-                    continue;
-                  } // end else (chart is cleanly installed)
-                }
-
-                // Non-one-shot: uninstall then reinstall to handle Helm immutable-field changes.
                 await this.chartManager.uninstall(
                   namespace,
                   constants.SOLO_DEPLOYMENT_CHART,
@@ -1919,26 +1892,15 @@ export class NetworkCommand extends BaseCommand {
 
           this.remoteConfig.configuration.components.changeNodePhase(componentId, DeploymentPhase.REQUESTED);
 
-          // During a normal upgrade the proxy components already exist in the remote config.
-          // During a recovery re-run (chart installed but remote config never updated) they
-          // don't exist yet.  Check actual presence rather than relying solely on isUpgrade so
-          // that recovery deploys always end up with the proxy entries they need.
           if (isUpgrade) {
             this.logger.info('Do not add envoy and haproxy components again during upgrade');
-          }
-
-          const existingEnvoyProxies: BaseStateSchema[] =
-            this.remoteConfig.configuration.components.getComponentByType<BaseStateSchema>(ComponentTypes.EnvoyProxy);
-          if (existingEnvoyProxies.length === 0) {
+          } else {
+            // do not add new envoy or haproxy components if they already exist
             this.remoteConfig.configuration.components.addNewComponent(
               this.componentFactory.createNewEnvoyProxyComponent(clusterReference, namespace),
               ComponentTypes.EnvoyProxy,
             );
-          }
 
-          const existingHaProxies: BaseStateSchema[] =
-            this.remoteConfig.configuration.components.getComponentByType<BaseStateSchema>(ComponentTypes.HaProxy);
-          if (existingHaProxies.length === 0) {
             this.remoteConfig.configuration.components.addNewComponent(
               this.componentFactory.createNewHaProxyComponent(clusterReference, namespace),
               ComponentTypes.HaProxy,

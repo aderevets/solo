@@ -39,6 +39,7 @@ import {ComponentTypes} from '../core/config/remote/enumerations/component-types
 import {injectable} from 'tsyringe-neo';
 import {Templates} from '../core/templates.js';
 import {SemanticVersion} from '../business/utils/semantic-version.js';
+import {assertUpgradeVersionNotOlder} from '../core/upgrade-version-guard.js';
 import {PvcReference} from '../integration/kube/resources/pvc/pvc-reference.js';
 import {PvcName} from '../integration/kube/resources/pvc/pvc-name.js';
 import {LedgerPhase} from '../data/schema/model/remote/ledger-phase.js';
@@ -51,6 +52,7 @@ import {
   ComponentUpgradeMigrationRules,
   type ComponentUpgradeMigrationStep,
 } from './migrations/component-upgrade-rules.js';
+import {optionFromFlag} from './command-helpers.js';
 
 interface BlockNodeDeployConfigClass {
   chartVersion: string;
@@ -73,7 +75,6 @@ interface BlockNodeDeployConfigClass {
   releaseName: string;
   livenessCheckPort: number;
   priorityMapping: Record<NodeAlias, number>;
-  isChartInstalled: boolean;
 }
 
 interface BlockNodeDeployContext {
@@ -509,46 +510,14 @@ export class BlockNodeCommand extends BaseCommand {
         {
           title: 'Prepare release name and block node name',
           task: async ({config}): Promise<void> => {
-            // In one-shot recovery the block-node component already exists in remote
-            // config with a stable ID (e.g. 1).  getReleaseName() and
-            // createNewBlockNodeComponent() both call getNewComponentId() which
-            // returns the NEXT available ID (e.g. 2), causing a new chart release
-            // (block-node-2) to be installed instead of reusing the existing one
-            // (block-node-1).  Use the existing component ID when in recovery.
-            if (this.oneShotState.isActive() && this.remoteConfig.isLoaded()) {
-              const existingBlockNodes: BlockNodeStateSchema[] =
-                this.remoteConfig.configuration.components.getComponentByType<BlockNodeStateSchema>(
-                  ComponentTypes.BlockNode,
-                );
-              if (existingBlockNodes.length > 0) {
-                const existingId: ComponentId = existingBlockNodes[0].metadata.id;
-                config.releaseName = this.renderReleaseName(existingId);
-                config.newBlockNodeComponent = this.componentFactory.createNewBlockNodeComponentWithId(
-                  existingId,
-                  config.clusterRef,
-                  config.namespace,
-                );
-              } else {
-                config.releaseName = this.getReleaseName();
-                config.newBlockNodeComponent = this.componentFactory.createNewBlockNodeComponent(
-                  config.clusterRef,
-                  config.namespace,
-                );
-              }
-            } else {
-              config.releaseName = this.getReleaseName();
-              config.newBlockNodeComponent = this.componentFactory.createNewBlockNodeComponent(
-                config.clusterRef,
-                config.namespace,
-              );
-            }
+            config.releaseName = this.getReleaseName();
+
+            config.newBlockNodeComponent = this.componentFactory.createNewBlockNodeComponent(
+              config.clusterRef,
+              config.namespace,
+            );
 
             config.newBlockNodeComponent.metadata.phase = DeploymentPhase.REQUESTED;
-            config.isChartInstalled = await this.chartManager.isChartInstalled(
-              config.namespace,
-              config.releaseName,
-              config.context,
-            );
           },
         },
         this.addBlockNodeComponent(),
@@ -556,46 +525,6 @@ export class BlockNodeCommand extends BaseCommand {
           title: 'Prepare chart values',
           task: async ({config}): Promise<void> => {
             config.valuesArg = await this.prepareValuesArgForBlockNode(config);
-          },
-        },
-        {
-          title: 'Clean up stuck block node chart and PVCs in recovery',
-          skip: async ({config}): Promise<boolean> => {
-            if (!this.oneShotState.isActive()) {
-              return true;
-            }
-            // Only clean up when the chart is already installed but the block node
-            // never reached DEPLOYED (e.g. SIGKILL before pod became Running).
-            if (!config.isChartInstalled) {
-              return true;
-            }
-            const existingBlockNodes: BlockNodeStateSchema[] = this.remoteConfig.isLoaded()
-              ? this.remoteConfig.configuration.components.getComponentByType<BlockNodeStateSchema>(
-                  ComponentTypes.BlockNode,
-                )
-              : [];
-            return !existingBlockNodes.some(
-              (node: BlockNodeStateSchema): boolean => node.metadata.phase === DeploymentPhase.REQUESTED,
-            );
-          },
-          task: async ({config}): Promise<void> => {
-            const {context, namespace, releaseName} = config;
-            // Uninstall the chart (removes StatefulSet but not PVCs).
-            await this.chartManager.uninstall(namespace, releaseName, context);
-            // Delete orphaned PVCs whose names end with the StatefulSet pod suffix
-            // (e.g. logging-storage-block-node-1-0, archive-storage-block-node-1-0, …).
-            const allPvcNames: string[] = await this.k8Factory.getK8(context).pvcs().list(namespace, []);
-            const suffix: string = `-${releaseName}-0`;
-            for (const pvcName of allPvcNames) {
-              if (pvcName.endsWith(suffix)) {
-                await this.k8Factory
-                  .getK8(context)
-                  .pvcs()
-                  .delete(PvcReference.of(namespace, PvcName.of(pvcName)));
-              }
-            }
-            // Mark chart as not installed so the deploy step does a fresh install.
-            config.isChartInstalled = false;
           },
         },
         {
@@ -881,16 +810,12 @@ export class BlockNodeCommand extends BaseCommand {
             config.currentVersion =
               this.remoteConfig.getComponentVersion(ComponentTypes.BlockNode)?.toString() ?? '0.0.0';
 
-            if (config.currentVersion !== '0.0.0') {
-              const currentSemVersion: SemanticVersion<string> = new SemanticVersion<string>(config.currentVersion);
-              const targetSemVersion: SemanticVersion<string> = new SemanticVersion<string>(config.upgradeVersion);
-              if (targetSemVersion.lessThanOrEqual(currentSemVersion)) {
-                throw new SoloError(
-                  `Block node upgrade target version ${config.upgradeVersion} is not newer than the current version ${config.currentVersion} stored in remote config. ` +
-                    'Use --upgrade-version to specify a version newer than the currently deployed version.',
-                );
-              }
-            }
+            assertUpgradeVersionNotOlder(
+              'Block node',
+              config.upgradeVersion,
+              this.remoteConfig.getComponentVersion(ComponentTypes.BlockNode),
+              optionFromFlag(flags.upgradeVersion),
+            );
 
             if (!this.oneShotState.isActive()) {
               return ListrLock.newAcquireLockTask(lease, task);
