@@ -77,6 +77,7 @@ import {RelayNodeStateSchema} from '../../../../data/schema/model/remote/state/r
 import {DeploymentPhase} from '../../../../data/schema/model/remote/deployment-phase.js';
 import {ComponentTypes} from '../../../../core/config/remote/enumerations/component-types.js';
 import {ConfigMap} from '../../../../integration/kube/resources/config-map/config-map.js';
+import {type Deployment} from '../../../../business/runtime-state/config/local/deployment.js';
 import chalk from 'chalk';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -124,6 +125,8 @@ export class DefaultOneShotDeployOrchestrator implements OneShotDeployOrchestrat
     configReference: {value?: OneShotSingleDeployConfigClass},
   ): OrchestratorPipeline<OneShotSingleDeployContext> {
     let config: OneShotSingleDeployConfigClass;
+    let shouldCreateDeployment: boolean = true;
+    let shouldAttachDeployment: boolean = true;
     const getConfigGlobal: () => OneShotSingleDeployConfigClass = (): OneShotSingleDeployConfigClass => config;
 
     const phases: Array<OrchestratorPipelinePhase<OneShotSingleDeployConfigClass, OneShotSingleDeployContext>> = [
@@ -224,6 +227,36 @@ export class DefaultOneShotDeployOrchestrator implements OneShotDeployOrchestrat
               deployment: config.deployment,
               namespace: config.namespace.name,
             });
+
+            await this.localConfig.load();
+
+            const existingDeployment: Deployment | undefined = this.localConfig.configuration.deployments.find(
+              (localDeployment): boolean => localDeployment.name === config.deployment,
+            );
+
+            if (existingDeployment) {
+              const existingNamespace: string = existingDeployment.namespace;
+              if (existingNamespace !== config.namespace.name) {
+                throw new SoloError(
+                  `Deployment '${config.deployment}' already exists in namespace '${existingNamespace}', requested namespace '${config.namespace.name}'`,
+                );
+              }
+
+              shouldCreateDeployment = false;
+
+              const hasClusterRefAttached: boolean = existingDeployment.clusters.some(
+                (clusterReference): boolean => clusterReference.toString() === config.clusterRef,
+              );
+
+              if (hasClusterRefAttached) {
+                shouldAttachDeployment = false;
+              }
+
+              this.logger.info(
+                `Reusing existing deployment '${config.deployment}' in namespace '${config.namespace.name}'` +
+                  `${hasClusterRefAttached ? ` with cluster-ref '${config.clusterRef}' already attached` : ''}`,
+              );
+            }
 
             // Apply small-memory node configuration only for CN >= 0.72.0 and when not using `one-shot falcon deploy`
             const cnVersion: SemanticVersion<string> = new SemanticVersion(versions.consensus);
@@ -365,6 +398,7 @@ export class DefaultOneShotDeployOrchestrator implements OneShotDeployOrchestrat
             DeploymentCommandDefinition.CREATE_COMMAND,
             (): string[] => DeployArgvBuilders.buildDeploymentCreateArgv(getConfig()),
             this.taskList,
+            (): boolean => !shouldCreateDeployment,
           ),
       }),
       new OrchestratorPipelinePhase('Deployment attach', {
@@ -374,6 +408,7 @@ export class DefaultOneShotDeployOrchestrator implements OneShotDeployOrchestrat
             DeploymentCommandDefinition.ATTACH_COMMAND,
             (): string[] => DeployArgvBuilders.buildDeploymentAttachArgv(getConfig()),
             this.taskList,
+            (): boolean => !shouldAttachDeployment,
           ),
       }),
       new OrchestratorPipelinePhase('Cluster setup', {
