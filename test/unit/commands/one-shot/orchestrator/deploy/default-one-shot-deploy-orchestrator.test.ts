@@ -2,15 +2,25 @@
 
 import {describe, it} from 'mocha';
 import {expect} from 'chai';
-import {
-  DefaultOneShotDeployOrchestrator,
-} from '../../../../../../src/commands/one-shot/orchestrator/deploy/default-one-shot-deploy-orchestrator.js';
+import {DefaultOneShotDeployOrchestrator} from '../../../../../../src/commands/one-shot/orchestrator/deploy/default-one-shot-deploy-orchestrator.js';
 import {NamespaceName} from '../../../../../../src/types/namespace/namespace-name.js';
 import {type OneShotSingleDeployContext} from '../../../../../../src/commands/one-shot/one-shot-single-deploy-context.js';
 import {DeploymentCommandDefinition} from '../../../../../../src/commands/command-definitions/deployment-command-definition.js';
 import {type OneShotSingleDeployConfigClass} from '../../../../../../src/commands/one-shot/one-shot-single-deploy-config-class.js';
 import {type CommandFlags} from '../../../../../../src/types/flag-types.js';
 import {type AnyObject, type ArgvStruct} from '../../../../../../src/types/aliases.js';
+import {type OrchestratorPipeline} from '../../../../../../src/commands/one-shot/orchestrator/orchestrator-pipeline.js';
+import {type TaskList} from '../../../../../../src/core/task-list/task-list.js';
+import {type SoloEventBus} from '../../../../../../src/core/events/solo-event-bus.js';
+import {type AccountManager} from '../../../../../../src/core/account-manager.js';
+import {type LocalConfigRuntimeState} from '../../../../../../src/business/runtime-state/config/local/local-config-runtime-state.js';
+import {type RemoteConfigRuntimeStateApi} from '../../../../../../src/business/runtime-state/api/remote-config-runtime-state-api.js';
+import {type SoloLogger} from '../../../../../../src/core/logging/solo-logger.js';
+import {type ConfigManager} from '../../../../../../src/core/config-manager.js';
+import {type OneShotState} from '../../../../../../src/core/one-shot-state.js';
+import {type K8Factory} from '../../../../../../src/integration/kube/k8-factory.js';
+import {type LockManager} from '../../../../../../src/core/lock/lock-manager.js';
+import {type ComponentFactoryApi} from '../../../../../../src/core/config/remote/api/component-factory-api.js';
 
 function buildOneShotConfig(): OneShotSingleDeployConfigClass {
   return {
@@ -67,7 +77,7 @@ describe('DefaultOneShotDeployOrchestrator', (): void => {
     };
 
     const localConfigStub: AnyObject = {
-      load: async (): Promise<void> => Promise.resolve(),
+      load: async (): Promise<void> => undefined,
       configuration: localConfigState,
     };
 
@@ -75,26 +85,45 @@ describe('DefaultOneShotDeployOrchestrator', (): void => {
       update: (): void => undefined,
       getFlag: (): unknown => false,
       setFlag: (): void => undefined,
-      executePrompt: async (): Promise<void> => Promise.resolve(),
+      executePrompt: async (): Promise<void> => undefined,
       getConfig: (): OneShotSingleDeployConfigClass => oneShotConfig,
     };
 
+    const taskListStub: TaskList<any> = {} as unknown as TaskList<any>;
+    const eventBusStub: SoloEventBus = {} as unknown as SoloEventBus;
+    const accountManagerStub: AccountManager = {} as unknown as AccountManager;
+    const localConfigRuntimeStateStub: LocalConfigRuntimeState = localConfigStub as LocalConfigRuntimeState;
+    const remoteConfigRuntimeStateStub: RemoteConfigRuntimeStateApi = {
+      configuration: {components: {addNewComponent: (): void => undefined}},
+    } as unknown as RemoteConfigRuntimeStateApi;
+    const soloLoggerStub: SoloLogger = {
+      addLogBindings: (): void => undefined,
+      info: (): void => undefined,
+    } as unknown as SoloLogger;
+    const configManagerTypedStub: ConfigManager = configManagerStub as ConfigManager;
+    const oneShotStateStub: OneShotState = {activate: (): void => undefined} as unknown as OneShotState;
+    const k8FactoryStub: K8Factory = {
+      default: (): AnyObject => ({contexts: (): AnyObject => ({readCurrent: (): string => oneShotConfig.context})}),
+    } as unknown as K8Factory;
+    const lockManagerStub: LockManager = {} as unknown as LockManager;
+    const componentFactoryStub: ComponentFactoryApi = {} as unknown as ComponentFactoryApi;
+
     const orchestrator: DefaultOneShotDeployOrchestrator = new DefaultOneShotDeployOrchestrator(
-      {} as AnyObject,
-      {} as AnyObject,
-      {} as AnyObject,
-      localConfigStub,
-      {configuration: {components: {addNewComponent: (): void => undefined}}} as AnyObject,
-      {addLogBindings: (): void => undefined, info: (): void => undefined} as AnyObject,
-      configManagerStub,
-      {activate: (): void => undefined} as AnyObject,
-      {default: (): AnyObject => ({contexts: (): AnyObject => ({readCurrent: (): string => oneShotConfig.context})})} as AnyObject,
-      {} as AnyObject,
-      {} as AnyObject,
+      taskListStub,
+      eventBusStub,
+      accountManagerStub,
+      localConfigRuntimeStateStub,
+      remoteConfigRuntimeStateStub,
+      soloLoggerStub,
+      configManagerTypedStub,
+      oneShotStateStub,
+      k8FactoryStub,
+      lockManagerStub,
+      componentFactoryStub,
     );
 
     const commandFlags: CommandFlags = {required: [], optional: []};
-    const pipeline = orchestrator.buildDeployPipeline(
+    const pipeline: OrchestratorPipeline<OneShotSingleDeployContext> = orchestrator.buildDeployPipeline(
       {_: []} as unknown as ArgvStruct,
       commandFlags,
       {},

@@ -244,17 +244,17 @@ export class DefaultOneShotDeployOrchestrator implements OneShotDeployOrchestrat
 
               shouldCreateDeployment = false;
 
-              const hasClusterRefAttached: boolean = existingDeployment.clusters.some(
+              const hasClusterReferenceAttached: boolean = existingDeployment.clusters.some(
                 (clusterReference): boolean => clusterReference.toString() === config.clusterRef,
               );
 
-              if (hasClusterRefAttached) {
+              if (hasClusterReferenceAttached) {
                 shouldAttachDeployment = false;
               }
 
               this.logger.info(
                 `Reusing existing deployment '${config.deployment}' in namespace '${config.namespace.name}'` +
-                  `${hasClusterRefAttached ? ` with cluster-ref '${config.clusterRef}' already attached` : ''}`,
+                  `${hasClusterReferenceAttached ? ` with cluster-ref '${config.clusterRef}' already attached` : ''}`,
               );
             }
 
