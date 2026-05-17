@@ -36,6 +36,7 @@ import {type OneShotState} from '../../core/one-shot-state.js';
 import * as versions from '../../../version.js';
 import {findMinioOperator} from '../../core/helpers.js';
 import {K8} from '../../integration/kube/k8.js';
+import {StatusCodes} from 'http-status-codes';
 
 @injectable()
 export class ClusterCommandTasks {
@@ -98,7 +99,15 @@ export class ClusterCommandTasks {
         task.title += context;
         try {
           await this.k8Factory.getK8(context).namespaces().list();
-        } catch {
+        } catch (error) {
+          if (ClusterCommandTasks.hasStatusCode(error, StatusCodes.FORBIDDEN)) {
+            this.logger.warn(
+              `Unable to list namespaces for context '${context}' due to insufficient permissions; ` +
+                'treating the cluster connection as valid',
+            );
+            return;
+          }
+
           task.title = `${task.title} - ${chalk.red('Cluster connection failed')}`;
           throw new SoloError(ErrorMessages.INVALID_CONTEXT_FOR_CLUSTER_DETAILED(context, clusterRef));
         }
@@ -125,6 +134,28 @@ export class ClusterCommandTasks {
     this.logger.showList(
       'Installed Charts',
       await this.chartManager.getInstalledCharts(clusterSetupNamespace, context),
+    );
+  }
+
+  private static hasStatusCode(error: unknown, statusCode: number): boolean {
+    if (!error || typeof error !== 'object') {
+      return false;
+    }
+
+    const typedError: {
+      statusCode?: number;
+      code?: number;
+      meta?: {
+        statusCode?: number;
+      };
+      cause?: unknown;
+    } = error;
+
+    return (
+      typedError.statusCode === statusCode ||
+      typedError.code === statusCode ||
+      typedError.meta?.statusCode === statusCode ||
+      ClusterCommandTasks.hasStatusCode(typedError.cause, statusCode)
     );
   }
 

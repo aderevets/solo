@@ -24,6 +24,7 @@ import {type SoloLogger} from '../../../src/core/logging/solo-logger.js';
 import {LocalConfigRuntimeState} from '../../../src/business/runtime-state/config/local/local-config-runtime-state.js';
 import {ClusterCommandTasks} from '../../../src/commands/cluster/tasks.js';
 import {type K8Factory} from '../../../src/integration/kube/k8-factory.js';
+import {SoloError} from '../../../src/core/errors/solo-error.js';
 
 const getBaseCommandOptions = (context: string) => {
   const options = {
@@ -115,6 +116,78 @@ describe('ClusterCommand unit tests', (): void => {
       await clusterCommandHandlers.setup(argv.build());
 
       expect(options.chartManager.install.args[0][2]).to.equal(constants.MINIO_OPERATOR_CHART);
+    });
+  });
+
+  describe('Cluster connection validation', (): void => {
+    afterEach((): void => {
+      sandbox.restore();
+    });
+
+    it('treats forbidden namespace listing as a valid restricted context', async (): Promise<void> => {
+      const loggerStub: sinon.SinonStubbedInstance<SoloLogger> = sandbox.createStubInstance(SoloPinoLogger);
+      const namespacesStub: {list: sinon.SinonStub} = {
+        list: sandbox.stub().rejects(new SoloError('forbidden', {statusCode: 403})),
+      };
+      const k8Stub: {namespaces: sinon.SinonStub} = {
+        namespaces: sandbox.stub().returns(namespacesStub),
+      };
+      const k8FactoryStub: sinon.SinonStubbedInstance<K8Factory> = sandbox.createStubInstance(K8ClientFactory) as any;
+      k8FactoryStub.getK8.returns(k8Stub as any);
+
+      const tasks: ClusterCommandTasks = new ClusterCommandTasks(
+        k8FactoryStub,
+        {} as any,
+        loggerStub,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+      );
+
+      const taskDefinition: {title: string; task: Function} = tasks.testConnectionToCluster() as any;
+      const taskContext: {config: {context: string; clusterRef: string}} = {
+        config: {context: 'inClusterContext', clusterRef: 'one-shot'},
+      };
+      const taskState: {title: string} = {title: taskDefinition.title};
+
+      await taskDefinition.task(taskContext, taskState);
+
+      expect(loggerStub.warn.calledOnce).to.equal(true);
+    });
+
+    it('still fails invalid contexts for non-forbidden errors', async (): Promise<void> => {
+      const loggerStub: sinon.SinonStubbedInstance<SoloLogger> = sandbox.createStubInstance(SoloPinoLogger);
+      const namespacesStub: {list: sinon.SinonStub} = {
+        list: sandbox.stub().rejects(new Error('boom')),
+      };
+      const k8Stub: {namespaces: sinon.SinonStub} = {
+        namespaces: sandbox.stub().returns(namespacesStub),
+      };
+      const k8FactoryStub: sinon.SinonStubbedInstance<K8Factory> = sandbox.createStubInstance(K8ClientFactory) as any;
+      k8FactoryStub.getK8.returns(k8Stub as any);
+
+      const tasks: ClusterCommandTasks = new ClusterCommandTasks(
+        k8FactoryStub,
+        {} as any,
+        loggerStub,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+      );
+
+      const taskDefinition: {title: string; task: Function} = tasks.testConnectionToCluster() as any;
+      const taskContext: {config: {context: string; clusterRef: string}} = {
+        config: {context: 'inClusterContext', clusterRef: 'one-shot'},
+      };
+      const taskState: {title: string} = {title: taskDefinition.title};
+
+      await expect(taskDefinition.task(taskContext, taskState)).to.be.rejectedWith(
+        'Context inClusterContext is not valid for cluster one-shot',
+      );
     });
   });
 });

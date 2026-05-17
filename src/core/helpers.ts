@@ -874,9 +874,16 @@ export async function createAndCopyBlockNodeJsonFileForConsensusNode(
     lines.push(`blockStream.writerMode=${constants.BLOCK_STREAM_WRITER_MODE}`);
   }
 
-  await k8.configMaps().update(namespace, 'network-node-data-config-cm', {
+  const sharedConfigMapName: string = constants.NETWORK_NODE_SHARED_DATA_CONFIG_MAP_NAME;
+  const sharedConfigMapData: Record<string, string> = {
     [constants.APPLICATION_PROPERTIES]: lines.join('\n'),
-  });
+  };
+
+  if (await k8.configMaps().exists(namespace, sharedConfigMapName)) {
+    await k8.configMaps().update(namespace, sharedConfigMapName, sharedConfigMapData);
+  } else {
+    await k8.configMaps().create(namespace, sharedConfigMapName, {}, sharedConfigMapData);
+  }
 
   const configName: string = `network-${nodeAlias}-data-config-cm`;
   const configMapExists: boolean = await k8.configMaps().exists(namespace, configName);

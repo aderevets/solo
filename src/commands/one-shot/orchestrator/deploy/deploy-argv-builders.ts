@@ -4,6 +4,7 @@ import {
   type OneShotSingleDeployConfigClass,
   type OneShotVersionsObject,
 } from '../../one-shot-single-deploy-config-class.js';
+import {type CreatedPredefinedAccount} from '../../predefined-accounts.js';
 import {BlockCommandDefinition} from '../../../command-definitions/block-command-definition.js';
 import {MirrorCommandDefinition} from '../../../command-definitions/mirror-command-definition.js';
 import {ExplorerCommandDefinition} from '../../../command-definitions/explorer-command-definition.js';
@@ -91,7 +92,10 @@ export class DeployArgvBuilders {
     return argvPushGlobalFlags(argv, config.cacheDir);
   }
 
-  public static buildRelayArgv(config: OneShotSingleDeployConfigClass): string[] {
+  public static buildRelayArgv(
+    config: OneShotSingleDeployConfigClass,
+    createdAccounts: CreatedPredefinedAccount[] = [],
+  ): string[] {
     const argv: string[] = newArgv();
     argv.push(
       ...RelayCommandDefinition.ADD_COMMAND.split(' '),
@@ -102,12 +106,23 @@ export class DeployArgvBuilders {
       optionFromFlag(Flags.nodeAliasesUnparsed),
       'node1',
     );
+    const operatorIdFlag: string = optionFromFlag(Flags.operatorId);
+    const operatorKeyFlag: string = optionFromFlag(Flags.operatorKey);
+    const relayLocalConfig: AnyObject = {
+      ...config.relayNodeConfiguration,
+    };
+
+    if (!relayLocalConfig[operatorIdFlag] && !relayLocalConfig[operatorKeyFlag] && createdAccounts.length > 0) {
+      relayLocalConfig[operatorIdFlag] = createdAccounts[0].accountId.toString();
+      relayLocalConfig[operatorKeyFlag] = createdAccounts[0].data.privateKey.toString();
+    }
+
     appendConfigToArgv(argv, {
       [optionFromFlag(Flags.relayReleaseTag)]: config.versions.relay,
       [optionFromFlag(Flags.externalAddress)]: config.externalAddress,
       [optionFromFlag(Flags.mirrorNodeId)]: MIRROR_NODE_ID,
       [optionFromFlag(Flags.mirrorNamespace)]: config.namespace.name,
-      ...config.relayNodeConfiguration,
+      ...relayLocalConfig,
     });
     return argvPushGlobalFlags(argv);
   }

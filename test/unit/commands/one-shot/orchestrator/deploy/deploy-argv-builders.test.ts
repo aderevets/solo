@@ -2,6 +2,7 @@
 
 import {describe, it} from 'mocha';
 import {expect} from 'chai';
+import {AccountId, PrivateKey} from '@hiero-ledger/sdk';
 import {ConsensusCommandDefinition} from '../../../../../../src/commands/command-definitions/consensus-command-definition.js';
 import * as constants from '../../../../../../src/core/constants.js';
 import {NamespaceName} from '../../../../../../src/types/namespace/namespace-name.js';
@@ -13,6 +14,19 @@ import {DeployArgvBuilders} from '../../../../../../src/commands/one-shot/orches
 import {optionFromFlag} from '../../../../../../src/commands/command-helpers.js';
 import {Flags} from '../../../../../../src/commands/flags.js';
 import {type AnyObject} from '../../../../../../src/types/aliases.js';
+import {type CreatedPredefinedAccount} from '../../../../../../src/commands/one-shot/predefined-accounts.js';
+
+function buildCreatedRelayAccount(): CreatedPredefinedAccount {
+  return {
+    accountId: AccountId.fromString('0.0.1234'),
+    data: {
+      privateKey: PrivateKey.fromStringECDSA('0x105d050185ccb907fba04dd92d8de9e32c18305e097ab41dadda21489a211524'),
+      alias: true,
+      group: 'ecdsa-alias',
+    },
+    publicKey: 'unused',
+  } as CreatedPredefinedAccount;
+}
 
 function makeConfig(overrides: Partial<OneShotSingleDeployConfigClass> = {}): OneShotSingleDeployConfigClass {
   return {
@@ -169,6 +183,31 @@ describe('buildRelayArgv', (): void => {
     expect(argv).to.include(optionFromFlag(Flags.mirrorNamespace));
     const namespaceIndex: number = argv.indexOf(optionFromFlag(Flags.mirrorNamespace));
     expect(argv[namespaceIndex + 1]).to.equal('test-ns');
+  });
+
+  it('uses a created one-shot account for relay operator when none is configured', (): void => {
+    const createdAccounts: CreatedPredefinedAccount[] = [buildCreatedRelayAccount()];
+    const argv: string[] = DeployArgvBuilders.buildRelayArgv(makeConfig(), createdAccounts);
+
+    expect(argv).to.include(optionFromFlag(Flags.operatorId));
+    expect(argv).to.include('0.0.1234');
+    expect(argv).to.include(optionFromFlag(Flags.operatorKey));
+    expect(argv).to.include(createdAccounts[0].data.privateKey.toString());
+  });
+
+  it('preserves an explicitly configured relay operator', (): void => {
+    const relayNodeConfiguration: Record<string, string> = {
+      [optionFromFlag(Flags.operatorId)]: '0.0.7777',
+      [optionFromFlag(Flags.operatorKey)]: 'explicit-key',
+    };
+    const argv: string[] = DeployArgvBuilders.buildRelayArgv(makeConfig({relayNodeConfiguration}), [
+      buildCreatedRelayAccount(),
+    ]);
+
+    const operatorIdIndex: number = argv.indexOf(optionFromFlag(Flags.operatorId));
+    const operatorKeyIndex: number = argv.indexOf(optionFromFlag(Flags.operatorKey));
+    expect(argv[operatorIdIndex + 1]).to.equal('0.0.7777');
+    expect(argv[operatorKeyIndex + 1]).to.equal('explicit-key');
   });
 });
 

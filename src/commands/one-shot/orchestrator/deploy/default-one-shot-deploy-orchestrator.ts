@@ -55,7 +55,7 @@ import {ConsensusCommandDefinition} from '../../../command-definitions/consensus
 import {ClusterReferenceCommandDefinition} from '../../../command-definitions/cluster-reference-command-definition.js';
 import {DeploymentCommandDefinition} from '../../../command-definitions/deployment-command-definition.js';
 import {KeysCommandDefinition} from '../../../command-definitions/keys-command-definition.js';
-import {invokeSoloCommand} from '../../../command-helpers.js';
+import {invokeSoloCommand, subTaskSoloCommand} from '../../../command-helpers.js';
 import {Flags as flags} from '../../../flags.js';
 import * as constants from '../../../../core/constants.js';
 import * as helpers from '../../../../core/helpers.js';
@@ -617,14 +617,39 @@ export class DefaultOneShotDeployOrchestrator implements OneShotDeployOrchestrat
               ),
           }).withWaitCondition(SoloEventType.MirrorNodeDeployed, Duration.ofMinutes(10)),
           new OrchestratorPipelinePhase('Deploy JSON-RPC Relay', {
-            asListrTask: (getConfig: () => OneShotSingleDeployConfigClass): SoloListrTask<OneShotSingleDeployContext> =>
-              invokeSoloCommand(
-                `solo ${RelayCommandDefinition.ADD_COMMAND}`,
-                RelayCommandDefinition.ADD_COMMAND,
-                (): string[] => DeployArgvBuilders.buildRelayArgv(getConfig()),
-                this.taskList,
-                (): boolean => !getConfig().deployRelay && !getConfig().minimalSetup,
-              ),
+            asListrTask: (getConfig: () => OneShotSingleDeployConfigClass): SoloListrTask<OneShotSingleDeployContext> => ({
+              title: `solo ${RelayCommandDefinition.ADD_COMMAND}`,
+              skip: (): boolean => !getConfig().deployRelay && !getConfig().minimalSetup,
+              task: async (
+                context_: OneShotSingleDeployContext,
+                taskListWrapper: SoloListrTaskWrapper<OneShotSingleDeployContext>,
+              ): Promise<Listr<ListrContext, ListrRendererValue, ListrRendererValue>> => {
+                return taskListWrapper.newListr(
+                  [
+                    {
+                      title: `solo ${RelayCommandDefinition.ADD_COMMAND}`,
+                      task: async (
+                        _isolatedContext: ListrContext,
+                        isolatedTaskWrapper: SoloListrTaskWrapper<OneShotSingleDeployContext>,
+                      ): Promise<
+                        | Listr<ListrContext, ListrRendererValue, ListrRendererValue>
+                        | Listr<ListrContext, ListrRendererValue, ListrRendererValue>[]
+                      > => {
+                        return subTaskSoloCommand(
+                          RelayCommandDefinition.ADD_COMMAND,
+                          isolatedTaskWrapper,
+                          (): string[] => DeployArgvBuilders.buildRelayArgv(getConfig(), context_.createdAccounts),
+                          this.taskList,
+                        );
+                      },
+                    },
+                  ],
+                  {
+                    ctx: {},
+                  },
+                );
+              },
+            }),
           })
             .withWaitCondition(SoloEventType.MirrorNodeDeployed, Duration.ofMinutes(10))
             .withWaitCondition(SoloEventType.NodesStarted, Duration.ofMinutes(10)),

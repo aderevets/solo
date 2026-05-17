@@ -835,8 +835,7 @@ export class MirrorNodeCommand extends BaseCommand {
           MirrorNodeCommand.MIRROR_ENVIRONMENT_VARIABLE_PREFIX,
         );
       },
-      skip: ({config}: MirrorNodeDeployContext): boolean =>
-        config.useExternalDatabase || !config.installSharedResources,
+      skip: ({config}: MirrorNodeDeployContext | MirrorNodeUpgradeContext): boolean => config.useExternalDatabase,
     };
   }
 
