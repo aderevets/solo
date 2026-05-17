@@ -834,7 +834,40 @@ export async function createAndCopyBlockNodeJsonFileForConsensusNode(
 
   const k8: K8 = k8Factory.getK8(context);
 
-  const container: Container = await new K8Helper(context).getConsensusNodeRootContainer(namespace, nodeAlias);
+  // In one-shot recovery, the consensus node pod may be in "Failed" phase if the
+  // first deploy was interrupted (SIGKILL) while the node was starting up.
+  // Try to exec into the pod; if it fails because the pod is in a completed
+  // (Failed) state, delete the pod so the StatefulSet recreates it.
+  const k8Helper: K8Helper = new K8Helper(context);
+  let container: Container = await k8Helper.getConsensusNodeRootContainer(namespace, nodeAlias);
+  try {
+    await container.execContainer('pwd');
+  } catch (execError) {
+    const execMessage: string = execError instanceof Error ? execError.message : String(execError);
+    if (execMessage.includes('cannot exec into a container in a completed pod')) {
+      logger.warn(
+        `Consensus node pod is in completed (Failed) phase (likely from interrupted deploy). ` +
+          'Deleting pod so StatefulSet recreates it.',
+      );
+      const pod: Pod = await k8Helper.getConsensusNodePod(namespace, nodeAlias);
+      if (pod.podReference) {
+        await k8.pods().delete(pod.podReference);
+      }
+      // Wait for the recreated pod to be running (up to 3 minutes).
+      await k8
+        .pods()
+        .waitForRunningPhase(
+          namespace,
+          Templates.renderNodeLabelsFromNodeAlias(nodeAlias),
+          180,
+          5000, // 5 seconds between attempts
+        );
+      logger.info('Consensus node pod recreated and running.');
+      container = await k8Helper.getConsensusNodeRootContainer(namespace, nodeAlias);
+    } else {
+      throw execError;
+    }
+  }
 
   await container.execContainer('pwd');
 

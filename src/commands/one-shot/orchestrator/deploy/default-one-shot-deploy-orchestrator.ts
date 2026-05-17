@@ -270,6 +270,36 @@ export class DefaultOneShotDeployOrchestrator implements OneShotDeployOrchestrat
                 `Reusing existing deployment '${config.deployment}' in namespace '${config.namespace.name}'` +
                   `${hasClusterReferenceAttached ? ` with cluster-ref '${config.clusterRef}' already attached` : ''}`,
               );
+            } else {
+              // No local deployment found – check if a remote config exists from a previous
+              // interrupted (SIGKILL) deploy where local config (~/.solo) was wiped (e.g. by
+              // CI pre-job cleanup).  If remote config exists, treat the deployment as existing
+              // to avoid re-creating resources that may conflict.
+              const remoteConfigExists: boolean = await this.k8Factory
+                .getK8(config.context)
+                .configMaps()
+                .exists(config.namespace, constants.SOLO_REMOTE_CONFIGMAP_NAME)
+                .catch((): boolean => false);
+
+              if (remoteConfigExists) {
+                this.logger.info(
+                  `Remote config found for deployment '${config.deployment}' in namespace '${config.namespace.name}' ` +
+                    `(local config absent – likely from interrupted deploy). Reusing existing deployment state.`,
+                );
+                shouldCreateDeployment = false;
+                shouldAttachDeployment = false;
+
+                // Load remote config so that the "Create remote config components" phase
+                // can detect already-existing components instead of duplicating them.
+                try {
+                  await this.remoteConfig.loadAndValidate(argv);
+                } catch (loadError) {
+                  this.logger.warn(
+                    `Failed to load remote config for interrupted deployment: ${loadError.message}. ` +
+                      'Proceeding with full deploy.',
+                  );
+                }
+              }
             }
 
             // Apply small-memory node configuration only for CN >= 0.72.0 and when not using `one-shot falcon deploy`
