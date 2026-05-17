@@ -22,6 +22,12 @@ import {patchInject} from './dependency-injection/container-helper.js';
 import {InjectTokens} from './dependency-injection/inject-tokens.js';
 import {type ConsensusNode} from './model/consensus-node.js';
 import {type K8Factory} from '../integration/kube/k8-factory.js';
+import {type K8} from '../integration/kube/k8.js';
+import {ContainerReference} from '../integration/kube/resources/container/container-reference.js';
+import {type Pod} from '../integration/kube/resources/pod/pod.js';
+import {type PodReference} from '../integration/kube/resources/pod/pod-reference.js';
+import {type Container} from '../integration/kube/resources/container/container.js';
+import {type ConfigMap} from '../integration/kube/resources/config-map/config-map.js';
 import {type ClusterReferenceName, DeploymentName, Realm, Shard} from './../types/index.js';
 import {PathEx} from '../business/utils/path-ex.js';
 import {AccountManager} from './account-manager.js';
@@ -148,7 +154,6 @@ export class ProfileManager {
     consensusNodes: ConsensusNode[],
     nodeAliases: NodeAliases,
     yamlRoot: AnyObject,
-    domainNamesMapping: Record<NodeAlias, string>,
     deploymentName: DeploymentName,
     applicationPropertiesPath: string,
     stagingOptions?: Partial<ProfileManagerStagingOptions>,
@@ -180,14 +185,18 @@ export class ProfileManager {
     const needsConfigTxt: boolean = versions.needsConfigTxtForConsensusVersion(resolvedStagingOptions.releaseTag);
     let configTxtPath: Optional<string>;
     if (needsConfigTxt) {
+      const gossipFqdnRestricted: boolean = await this.getGossipFqdnRestricted(
+        consensusNodes,
+        applicationPropertiesPath,
+      );
       configTxtPath = await this.prepareConfigTxt(
         accountMap,
         consensusNodes,
         stagingDirectory,
         resolvedStagingOptions.releaseTag,
-        domainNamesMapping,
         resolvedStagingOptions.appName,
         resolvedStagingOptions.chainId,
+        gossipFqdnRestricted,
       );
     }
 
@@ -199,6 +208,7 @@ export class ProfileManager {
     );
 
     await this.updateApplicationPropertiesForBlockNode(applicationPropertiesPath);
+    await this.updateApplicationPropertiesWithChainId(applicationPropertiesPath, resolvedStagingOptions.chainId);
 
     for (const flag of flags.nodeConfigFileFlags.values()) {
       const sourceFilePath: string = this.configManager.getFlagFile(flag);
@@ -214,8 +224,30 @@ export class ProfileManager {
       const destinationPath: string = PathEx.join(stagingDirectory, 'templates', destinationFileName);
       this.logger.debug(`Copying configuration file to staging: ${sourceAbsoluteFilePath} -> ${destinationPath}`);
 
-      fs.cpSync(sourceAbsoluteFilePath, destinationPath, {force: true});
+      // For application.properties: when the user provides a custom file (flag value differs
+      // from the default relative path), use the user's file as the base and then apply
+      // Solo's required overrides (realm, shard, block-node settings) on top.
+      // This preserves all user-defined properties while ensuring Solo's critical settings win.
+      const flagValue: string | undefined = this.configManager.getFlag<string>(flags.applicationProperties);
+      const isUserSuppliedApplicationProperties: boolean =
+        flag.name === flags.applicationProperties.name &&
+        !!flagValue &&
+        flagValue !== (flags.applicationProperties.definition.defaultValue as string);
+
+      if (isUserSuppliedApplicationProperties) {
+        // Base: Solo's updated default (realm/shard/block-node settings already applied).
+        // Apply user's properties as key-level overrides: existing keys are updated,
+        // new keys are appended.  This avoids duplicates while preserving all Solo defaults
+        // that the user did not explicitly override.
+        fs.cpSync(applicationPropertiesPath, destinationPath, {force: true});
+        await this.mergeApplicationProperties(destinationPath, sourceAbsoluteFilePath);
+      } else {
+        fs.cpSync(sourceAbsoluteFilePath, destinationPath, {force: true});
+      }
     }
+
+    const bootstrapPropertiesPath: string = PathEx.join(stagingDirectory, 'templates', 'bootstrap.properties');
+    await this.updateBoostrapPropertiesWithChainId(bootstrapPropertiesPath, resolvedStagingOptions.chainId);
 
     if (configTxtPath) {
       this._setFileContentsAsValue('hedera.configMaps.configTxt', configTxtPath, yamlRoot);
@@ -232,7 +264,7 @@ export class ProfileManager {
     );
     this._setFileContentsAsValue(
       'hedera.configMaps.applicationProperties',
-      PathEx.joinWithRealPath(stagingDirectory, 'templates', 'application.properties'),
+      PathEx.joinWithRealPath(stagingDirectory, 'templates', constants.APPLICATION_PROPERTIES),
       yamlRoot,
     );
     this._setFileContentsAsValue(
@@ -332,15 +364,14 @@ export class ProfileManager {
   /**
    * Prepare a values file for Solo Helm chart
    * @param consensusNodes - the list of consensus nodes
-   * @param domainNamesMapping
    * @param deploymentName
    * @param applicationPropertiesPath
    * @param jfrFile - the name of the custom JFR settings file to use for recording (basename only)
+   * @param stagingOptions
    * @returns mapping of cluster-ref to the full path to the values file
    */
   public async prepareValuesForSoloChart(
     consensusNodes: ConsensusNode[],
-    domainNamesMapping: Record<NodeAlias, string>,
     deploymentName: DeploymentName,
     applicationPropertiesPath: string,
     jfrFile: string = '',
@@ -360,7 +391,6 @@ export class ProfileManager {
         consensusNodes,
         nodeAliases,
         yamlRoot,
-        domainNamesMapping,
         deploymentName,
         applicationPropertiesPath,
         stagingOptions,
@@ -433,6 +463,64 @@ export class ProfileManager {
     await writeFile(applicationPropertiesPath, lines.join('\n'));
   }
 
+  /**
+   * Merge a user-supplied application.properties into the existing staging file.
+   * Solo's defaults (already written to stagingPath) are the base; for each key in the
+   * user's file the existing line is replaced in-place.  Keys not present in the base
+   * are appended at the end.  This avoids duplicate entries while preserving every
+   * Solo default the user did not explicitly override.
+   */
+  private async mergeApplicationProperties(stagingPath: string, userFilePath: string): Promise<void> {
+    this.logger.debug(`Merging user application.properties '${userFilePath}' into staging '${stagingPath}'`);
+    const stagingContent: string = await readFile(stagingPath, 'utf8');
+    const userContent: string = await readFile(userFilePath, 'utf8');
+
+    // Parse user file into key→value map (comments and blank lines are skipped)
+    const userProperties: Map<string, string> = new Map<string, string>();
+    for (const line of userContent.split('\n')) {
+      const trimmed: string = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) {
+        continue;
+      }
+      const equalsIndex: number = trimmed.indexOf('=');
+      if (equalsIndex > 0) {
+        userProperties.set(trimmed.slice(0, equalsIndex).trim(), trimmed.slice(equalsIndex + 1));
+      }
+    }
+
+    // Walk staging lines, replacing values for keys the user supplied
+    const appliedKeys: Set<string> = new Set<string>();
+    const resultLines: string[] = [];
+    for (const line of stagingContent.split('\n')) {
+      const trimmed: string = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) {
+        resultLines.push(line);
+        continue;
+      }
+      const equalsIndex: number = trimmed.indexOf('=');
+      if (equalsIndex > 0) {
+        const key: string = trimmed.slice(0, equalsIndex).trim();
+        if (userProperties.has(key)) {
+          resultLines.push(`${key}=${userProperties.get(key)}`);
+          appliedKeys.add(key);
+        } else {
+          resultLines.push(line);
+        }
+      } else {
+        resultLines.push(line);
+      }
+    }
+
+    // Append keys from user's file that were not present in Solo's default
+    for (const [key, value] of userProperties) {
+      if (!appliedKeys.has(key)) {
+        resultLines.push(`${key}=${value}`);
+      }
+    }
+
+    await writeFile(stagingPath, resultLines.join('\n'));
+  }
+
   private async updateApplicationPropertiesForBlockNode(applicationPropertiesPath: string): Promise<void> {
     const blockNodes: BlockNodeStateSchema[] = this.remoteConfig.configuration.components.state.blockNodes;
     const hasDeployedBlockNodes: boolean = blockNodes.length > 0;
@@ -469,6 +557,35 @@ export class ProfileManager {
     }
 
     await writeFile(applicationPropertiesPath, lines.join('\n') + '\n');
+  }
+
+  private async updateApplicationPropertiesWithChainId(
+    applicationPropertiesPath: string,
+    chainId: string,
+  ): Promise<void> {
+    const fileText: string = await readFile(applicationPropertiesPath, 'utf8');
+    const lines: string[] = fileText.split('\n');
+
+    for (const line of lines) {
+      if (line.startsWith('contracts.chainId=')) {
+        lines[lines.indexOf(line)] = `contracts.chainId=${chainId}`;
+      }
+    }
+
+    await writeFile(applicationPropertiesPath, lines.join('\n') + '\n');
+  }
+
+  private async updateBoostrapPropertiesWithChainId(bootstrapPropertiesPath: string, chainId: string): Promise<void> {
+    const fileText: string = await readFile(bootstrapPropertiesPath, 'utf8');
+    const lines: string[] = fileText.split('\n');
+
+    for (const line of lines) {
+      if (line.startsWith('contracts.chainId=')) {
+        lines[lines.indexOf(line)] = `contracts.chainId=${chainId}`;
+      }
+    }
+
+    await writeFile(bootstrapPropertiesPath, lines.join('\n') + '\n');
   }
 
   private async updateApplicationPropertiesWithRealmAndShard(
@@ -570,15 +687,103 @@ export class ProfileManager {
   }
 
   /**
+   * Extracts gossip endpoints from saved state (network.json) if it exists
+   * @param consensusNode - the consensus node to check
+   * @param nodeSeq - the node sequence number (index in roster)
+   * @returns the saved endpoint address or undefined if no saved state exists or IP is no longer valid
+   * @private
+   */
+  private async extractSavedEndpoint(consensusNode: ConsensusNode, nodeSeq: number): Promise<Address | undefined> {
+    try {
+      const k8: K8 = this.k8Factory.getK8(consensusNode.context);
+      const networkJsonPath: string = `${constants.HEDERA_HAPI_PATH}/output/network.json`;
+
+      // Check if network.json exists in the pod
+      const pods: Pod[] = await k8
+        .pods()
+        .list(NamespaceName.of(consensusNode.namespace), [`app=network-${consensusNode.name}`]);
+      if (pods.length === 0) {
+        return undefined;
+      }
+
+      const pod: Pod = pods[0];
+      const podReference: PodReference = pod.podReference;
+
+      // Get container reference
+      const containerReference: ContainerReference = ContainerReference.of(podReference, constants.ROOT_CONTAINER);
+      const container: Container = k8.containers().readByRef(containerReference);
+
+      // Try to read network.json from the pod
+      const networkJsonContent: string = await container.execContainer(['cat', networkJsonPath]);
+
+      if (!networkJsonContent || networkJsonContent.includes('No such file')) {
+        return undefined;
+      }
+
+      const networkJson: Record<string, unknown> = JSON.parse(networkJsonContent);
+      const nodeMetadata: unknown = networkJson?.nodeMetadata?.[nodeSeq];
+      const rosterEntry: {gossipEndpoint?: Array<Record<string, unknown>>} | undefined = (
+        nodeMetadata as {rosterEntry?: {gossipEndpoint?: Array<Record<string, unknown>>}} | undefined
+      )?.rosterEntry;
+      const gossipEndpointRaw: Record<string, unknown> | undefined = rosterEntry?.gossipEndpoint?.[0];
+      const port: number = (gossipEndpointRaw?.port as number) || 0;
+      const domainName: string | undefined =
+        typeof gossipEndpointRaw?.domainName === 'string' ? gossipEndpointRaw.domainName : undefined;
+      const ipAddressV4: string | undefined =
+        typeof gossipEndpointRaw?.ipAddressV4 === 'string' ? gossipEndpointRaw.ipAddressV4 : undefined;
+
+      if (!gossipEndpointRaw) {
+        return undefined;
+      }
+
+      // Check if endpoint uses domain name (FQDN)
+      if (domainName) {
+        this.logger.info(`Found saved endpoint for ${consensusNode.name}: ${domainName}:${port} (FQDN)`);
+        return new Address(port, domainName);
+      }
+
+      // Check if endpoint uses IP address
+      if (ipAddressV4) {
+        // Decode base64 IP address
+        const base64Ip: string = ipAddressV4 as string;
+        const ipBytes: Buffer = Buffer.from(base64Ip, 'base64');
+        const ipAddress: string = [...ipBytes].join('.');
+
+        // Validate the saved IP still belongs to this node service.
+        const serviceName: string = `network-${consensusNode.name}-svc`;
+        const service: {spec?: {clusterIP?: string}} | undefined = await k8
+          .services()
+          .read(NamespaceName.of(consensusNode.namespace), serviceName);
+        const serviceIpAddress: string | undefined = service?.spec?.clusterIP;
+        if (serviceIpAddress !== ipAddress) {
+          this.logger.warn(
+            `Saved endpoint ${ipAddress}:${port} for ${consensusNode.name} does not match current ${serviceName} ClusterIP ${serviceIpAddress ?? 'undefined'}, falling back to current service address`,
+          );
+          return undefined;
+        }
+
+        this.logger.info(`Found saved endpoint for ${consensusNode.name}: ${ipAddress}:${port} (IP)`);
+        return new Address(port, ipAddress);
+      }
+
+      return undefined;
+    } catch (error: Error | unknown) {
+      // If anything fails, return undefined to fall back to getExternalAddress
+      this.logger.debug(
+        `Could not extract saved endpoint for ${consensusNode.name}: ${error instanceof Error ? error.message : 'unknown error'}`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
    * Prepares config.txt file for the node
    * @param nodeAccountMap - the map of node aliases to account IDs
    * @param consensusNodes - the list of consensus nodes
-   * @param destPath - path to the destination directory to write the config.txt file
+   * @param destinationPath
    * @param releaseTagOverride - release tag override
-   * @param domainNamesMapping
    * @param [appName] - the app name (default: HederaNode.jar)
    * @param [chainId] - chain ID (298 for local network)
-   * @param [loadBalancerEnabled] - whether the load balancer is enabled (flag is not set by default)
    * @returns the config.txt file path
    */
   public async prepareConfigTxt(
@@ -586,9 +791,9 @@ export class ProfileManager {
     consensusNodes: ConsensusNode[],
     destinationPath: string,
     releaseTagOverride: string,
-    domainNamesMapping: Record<NodeAlias, string>,
     appName: string = constants.HEDERA_APP_NAME,
     chainId: string = constants.HEDERA_CHAIN_ID,
+    gossipFqdnRestricted: boolean = true,
   ): Promise<string> {
     let releaseTag: string = releaseTagOverride;
     if (!nodeAccountMap || nodeAccountMap.size === 0) {
@@ -626,11 +831,18 @@ export class ProfileManager {
           consensusNode.name as NodeAlias,
         );
 
-        const address: Address = await Address.getExternalAddress(
-          consensusNode,
-          this.k8Factory.getK8(consensusNode.context),
-          externalPort,
-        );
+        // First try to extract endpoint from saved state (migration scenario)
+        let address: Address | undefined = await this.extractSavedEndpoint(consensusNode, nodeSeq);
+
+        // If no saved state, get current external address
+        if (!address) {
+          address = await Address.getExternalAddress(
+            consensusNode,
+            this.k8Factory.getK8(consensusNode.context),
+            externalPort,
+            gossipFqdnRestricted,
+          );
+        }
 
         const account: string | undefined = nodeAccountMap.get(consensusNode.name as NodeAlias);
 
@@ -654,5 +866,50 @@ export class ProfileManager {
         error,
       );
     }
+  }
+
+  private parseGossipFqdnRestricted(applicationPropertiesText: string): boolean | undefined {
+    const match: RegExpMatchArray | null = applicationPropertiesText.match(
+      /^\s*nodes\.gossipFqdnRestricted\s*=\s*(true|false)\s*$/m,
+    );
+    if (match?.[1]) {
+      return match[1].toLowerCase() === 'true';
+    }
+    return undefined;
+  }
+
+  private async getGossipFqdnRestricted(
+    consensusNodes: ConsensusNode[],
+    applicationPropertiesPath: string,
+  ): Promise<boolean> {
+    const firstNode: ConsensusNode | undefined = consensusNodes[0];
+    if (firstNode) {
+      try {
+        const k8: K8 = this.k8Factory.getK8(firstNode.context);
+        const configMap: ConfigMap = await k8
+          .configMaps()
+          .read(NamespaceName.of(firstNode.namespace), constants.NETWORK_NODE_SHARED_DATA_CONFIG_MAP_NAME);
+        const configMapProperties: string | undefined = configMap.data?.[constants.APPLICATION_PROPERTIES];
+        if (configMapProperties) {
+          const parsedFromConfigMap: boolean | undefined = this.parseGossipFqdnRestricted(configMapProperties);
+          if (parsedFromConfigMap !== undefined) {
+            return parsedFromConfigMap;
+          }
+        }
+      } catch {
+        // Fall through to local application.properties
+      }
+    }
+
+    if (fs.existsSync(applicationPropertiesPath)) {
+      const applicationPropertiesContent: string = fs.readFileSync(applicationPropertiesPath, 'utf8');
+      const parsedFromApplicationProperties: boolean | undefined =
+        this.parseGossipFqdnRestricted(applicationPropertiesContent);
+      if (parsedFromApplicationProperties !== undefined) {
+        return parsedFromApplicationProperties;
+      }
+    }
+
+    return true;
   }
 }

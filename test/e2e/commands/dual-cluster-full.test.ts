@@ -8,7 +8,7 @@ import {InjectTokens} from '../../../src/core/dependency-injection/inject-tokens
 import fs from 'node:fs';
 import {type K8ClientFactory} from '../../../src/integration/kube/k8-client/k8-client-factory.js';
 import {type K8} from '../../../src/integration/kube/k8.js';
-import {DEFAULT_LOCAL_CONFIG_FILE} from '../../../src/core/constants.js';
+import {DEFAULT_LOCAL_CONFIG_FILE, RESOURCES_DIR} from '../../../src/core/constants.js';
 import {Duration} from '../../../src/core/time/duration.js';
 import {PathEx} from '../../../src/business/utils/path-ex.js';
 
@@ -30,17 +30,27 @@ import {destroyEnabled} from '../../test-utility.js';
 
 const testName: string = 'dual-cluster-full';
 
+// Use dual-cluster specific values file with higher memory limits to prevent OOM
+const dualClusterValuesFile: string = PathEx.joinWithRealPath(
+  RESOURCES_DIR,
+  'mirror-node-values-dual-cluster-minimal.yaml',
+);
+
+const consensusNodesCount: number = process.env['SOLO_DUAL_CLUSTER_NODE_COUNT']
+  ? Number.parseInt(process.env['SOLO_DUAL_CLUSTER_NODE_COUNT'], 10)
+  : 3;
+
 const endToEndTestSuite: EndToEndTestSuite = new EndToEndTestSuiteBuilder()
   .withTestName(testName)
   .withTestSuiteName('Dual Cluster Full E2E Test Suite')
   .withNamespace(testName)
   .withDeployment(`${testName}-deployment`)
   .withClusterCount(2)
-  .withConsensusNodesCount(2)
+  .withConsensusNodesCount(consensusNodesCount)
   .withLoadBalancerEnabled(true)
   .withPinger(true)
-  .withRealm(2)
   .withShard(3)
+  .withRealm(2)
   .withServiceMonitor(true)
   .withPodLog(true)
   .withTestSuiteCallback(
@@ -90,7 +100,8 @@ const endToEndTestSuite: EndToEndTestSuite = new EndToEndTestSuiteBuilder()
         ConsensusNodeTest.setup(options);
         ConsensusNodeTest.start(options, true);
 
-        MirrorNodeTest.add(options);
+        // Use dual-cluster specific values file with higher memory limits
+        MirrorNodeTest.add({...options, valuesFile: dualClusterValuesFile});
         MirrorNodeTest.pullAddressBook(options);
 
         ConsensusNodeTest.PemStop(options);

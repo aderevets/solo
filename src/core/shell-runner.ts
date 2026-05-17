@@ -1,17 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import {ChildProcessWithoutNullStreams, spawn} from 'node:child_process';
+import {ChildProcess, ChildProcessWithoutNullStreams, spawn} from 'node:child_process';
 import chalk from 'chalk';
 import {type SoloLogger} from './logging/solo-logger.js';
 import {inject, injectable} from 'tsyringe-neo';
 import {patchInject} from './dependency-injection/container-helper.js';
 import {InjectTokens} from './dependency-injection/inject-tokens.js';
 import {OperatingSystem} from '../business/utils/operating-system.js';
+import {SensitiveDataRedactor} from './util/sensitive-data-redactor.js';
 
 @injectable()
 export class ShellRunner {
   public constructor(@inject(InjectTokens.SoloLogger) public logger?: SoloLogger) {
     this.logger = patchInject(logger, InjectTokens.SoloLogger, this.constructor.name);
+  }
+
+  /**
+   * Redacts sensitive arguments from a command array.
+   * Delegates to the shared {@link SensitiveDataRedactor} utility.
+   * @param arguments_ The arguments array to redact
+   * @returns A new redacted arguments array
+   */
+  public static redactArguments(arguments_: string[]): string[] {
+    return SensitiveDataRedactor.redactArguments(arguments_, {
+      flagsToRedactNextArgument: ['--password', '-p'],
+      setStyleFlags: ['--set', '--set-string', '--set-file'],
+    });
   }
 
   /** Returns a promise that invokes the shell command */
@@ -22,23 +36,30 @@ export class ShellRunner {
     detached: boolean = false,
     environmentVariablesToAppend: Record<string, string> = {},
     timeoutMs?: number,
+    useShell: boolean = true,
   ): Promise<string[]> {
-    const message: string = `Executing command${OperatingSystem.isWin32() ? ' (Windows)' : ''}: ${cmd} ${arguments_.join(' ')}`;
+    const redactedArguments: string[] = ShellRunner.redactArguments(arguments_);
+    const message: string = `Executing command${OperatingSystem.isWin32() ? ' (Windows)' : ''}: ${cmd} ${redactedArguments.join(' ')}`;
     const callStack: string = new Error(message).stack; // capture the callstack to be included in error
     this.logger.info(message);
 
     return new Promise<string[]>((resolve, reject): void => {
-      const child: ChildProcessWithoutNullStreams = spawn(cmd, arguments_, {
+      const child: ChildProcessWithoutNullStreams | ChildProcess = spawn(cmd, arguments_, {
         env: {...process.env, ...environmentVariablesToAppend},
-        shell: true,
+        shell: useShell,
         detached,
-        stdio: detached ? 'ignore' : undefined,
-        windowsHide: OperatingSystem.isWin32(), // hide the console window on Windows
+        stdio: detached && !OperatingSystem.isWin32() ? 'ignore' : undefined,
       });
 
       if (detached) {
-        child.unref(); // allow the parent process to exit independently of this child
-        resolve([]);
+        child.once('error', (error): void => {
+          error.stack = callStack;
+          reject(error);
+        });
+        child.once('spawn', (): void => {
+          child.unref(); // allow the parent process to exit independently of this child
+          resolve([]);
+        });
         return;
       }
 
@@ -136,14 +157,14 @@ export class ShellRunner {
   ): Promise<string[]> {
     // Use Promise.race to handle sudo whoami and timeout
     let whoamiResolved: boolean = false;
-    const whoamiPromise: Promise<string[]> = this.run('sudo whoami').then(async result => {
+    const whoamiPromise: Promise<string[]> = this.run('sudo whoami').then(async (result): Promise<string[]> => {
       whoamiResolved = true;
       sudoGranted('Root access granted.');
       return result;
     });
     // eslint-disable-next-line no-async-promise-executor
-    const timeoutPromise = new Promise<string[]>(async resolve => {
-      await new Promise(callback => setTimeout(callback, 500));
+    const timeoutPromise: Promise<string[]> = new Promise<string[]>(async (resolve): Promise<void> => {
+      await new Promise((callback): NodeJS.Timeout => setTimeout(callback, 500));
       if (!whoamiResolved) {
         sudoRequested('Please provide root permissions to proceed...');
       }

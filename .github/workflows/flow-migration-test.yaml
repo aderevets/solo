@@ -18,7 +18,23 @@ name: "Test Migration Process"
 
 on:
   workflow_dispatch:
+    inputs:
+      from-solo-version:
+        description: 'Solo version to use before migration'
+        required: false
+        type: string
+      to-consensus-node-version:
+        description: 'Consensus node release tag to use after migration'
+        required: false
+        type: string
   workflow_call:
+    inputs:
+      from-solo-version:
+        required: false
+        type: string
+      to-consensus-node-version:
+        required: false
+        type: string
   push:
     branches:
       - main
@@ -28,10 +44,7 @@ on:
       - reopened
       - synchronize
 concurrency:
-  # One run per PR or per branch. A new push cancels any in-progress run for
-  # the same PR/branch, saving runner resources. workflow_dispatch runs are
-  # not cancelled — each manual trigger gets its own group via run_id.
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'auto' }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 defaults:
@@ -49,11 +62,12 @@ env:
 jobs:
   test-migration-process:
     name: Migrate Solo from Prior to Current Version
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     timeout-minutes: 60
     runs-on: hiero-solo-linux-large
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@f808768d1510423e83855289c910610ca9b43176 # v2.17.0
+        uses: step-security/harden-runner@9ca718d3bf646d6534007c269a635b3e54cadf99 # v2.19.2
         timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
         with:
           egress-policy: audit
@@ -63,7 +77,7 @@ jobs:
         timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
 
       - name: Setup Node
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
         with:
           node-version: 22
@@ -87,24 +101,42 @@ jobs:
           wait: 120s
 
       - name: Install Kubectl
-        uses: step-security/setup-kubectl@fa3574e17195eaed56b1e9d9095c58d0aee24f03 # pinned to v4.0.1
+        uses: step-security/setup-kubectl@b256bc71248a59f1e3a278fc75a65646d6a8a1c4 # pinned to v5.1.0
         timeout-minutes: ${{ fromJSON(env.STEP_TIMEOUT_MINUTES) }}
         with:
           version: 'v1.27.3'
         id: install
 
-      - name: Get Latest Version
+      - name: Resolve Input Versions
         id: get-version
-        uses: step-security/retry@e1d59ce1f574b32f0915e3a8df055cfe9f99be5d # v3.0.4
+        uses: step-security/retry@38808b4332b98bb36ca031abff0c100231608288 # v4.0.0
         with:
           max_attempts: 3
           timeout_minutes: 5
           command: |
-            LATEST_VERSION=$(curl -s https://registry.npmjs.org/@hashgraph/solo/latest | jq -r '.version')
-            echo "Latest Version: ${LATEST_VERSION}"
-            echo "version=${LATEST_VERSION}" >> $GITHUB_OUTPUT
+            source .github/workflows/script/helper.sh
+            FROM_INPUT="${{ inputs.from-solo-version }}"
+            TO_CN_INPUT="${{ inputs.to-consensus-node-version }}"
 
-      - name: Launch Network with Prior Release ${{ steps.get-version.outputs.version }}
+            if [[ -z "${FROM_INPUT}" ]]; then
+              FROM_INPUT=$(curl -s https://registry.npmjs.org/@hashgraph/solo/latest | jq -r '.version')
+            fi
+
+            if [[ -z "${TO_CN_INPUT}" ]]; then
+              TO_CN_INPUT=$(extract_version TEST_UPGRADE_TO_VERSION version-test.ts)
+            fi
+
+            if [[ -z "${TO_CN_INPUT}" ]]; then
+              echo "Failed to resolve to-consensus-node-version input or TEST_UPGRADE_TO_VERSION from version-test.ts"
+              exit 1
+            fi
+
+            echo "From Solo Version: ${FROM_INPUT}"
+            echo "To Consensus Node Version: ${TO_CN_INPUT}"
+            echo "from_solo_version=${FROM_INPUT}" >> $GITHUB_OUTPUT
+            echo "to_consensus_node_version=${TO_CN_INPUT}" >> $GITHUB_OUTPUT
+
+      - name: Launch Network with Prior Release ${{ steps.get-version.outputs.from_solo_version }}
         timeout-minutes: 60
         run: |
           export PATH=~/.solo/bin:${PATH}
@@ -139,14 +171,16 @@ jobs:
           }
           trap cleanup SIGTERM SIGINT
 
-          .github/workflows/script/launch_network.sh ${{ steps.get-version.outputs.version }} &
+          .github/workflows/script/launch_network.sh \
+            "${{ steps.get-version.outputs.from_solo_version }}" \
+            "${{ steps.get-version.outputs.to_consensus_node_version }}" &
           SCRIPT_PID=$!
           wait "${SCRIPT_PID}" || RC=$?
           SCRIPT_PID=""
           trap - SIGTERM SIGINT
 
           if [[ "$RC" != "0" ]]; then
-            echo "Failed to launch network with release version ${{ steps.get-version.outputs.version }}"
+            echo "Failed to launch network with release version ${{ steps.get-version.outputs.from_solo_version }}"
             exit $RC
           fi
 

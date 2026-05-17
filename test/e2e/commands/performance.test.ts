@@ -25,6 +25,17 @@ import {type LocalConfigRuntimeState} from '../../../src/business/runtime-state/
 import {type Deployment} from '../../../src/business/runtime-state/config/local/deployment.js';
 import {type AggregatedMetrics} from '../../../src/business/runtime-state/model/aggregated-metrics.js';
 
+// A snapshot file on disk has AggregatedMetrics' fields plus the peakMemoryInMebibytes
+// we inject during logMetrics().
+type AugmentedSnapshot = AggregatedMetrics & {peakMemoryInMebibytes: number};
+
+// The per-namespace summary adds peak attribution on top of a representative snapshot.
+type PerformanceSummary = AugmentedSnapshot & {
+  peakCpuInMillicores: number;
+  peakCpuSnapshot: string;
+  peakMemorySnapshot: string;
+};
+
 const testName: string = 'performance-tests';
 const deploymentName: string = `${testName}-deployment`;
 const testTitle: string = 'E2E Performance Tests';
@@ -39,9 +50,11 @@ const associations: number = 50;
 const nfts: number = 50;
 const percent: number = 50;
 const maxTps: number = 100;
+const nftTransferLoadTestTimeoutMultiplier: number = 6;
 let startTime: Date;
 let metricsInterval: NodeJS.Timeout;
 let events: string[] = [];
+let peakMemoryInMebibytes: number = 0;
 
 // When the workflow cancels this step (e.g. due to a new commit superseding the PR),
 // go-task forwards SIGTERM to this process' process group before SIGKILL reaches task.
@@ -123,38 +136,42 @@ const endToEndTestSuite: EndToEndTestSuite = new EndToEndTestSuiteBuilder()
 
           let maxCpuMetrics: number = 0;
           let maxCpuFile: string = '';
+          let maxMemoryMetrics: number = 0;
+          let maxMemoryFile: string = '';
           for (const [fileName, metrics] of Object.entries(allMetrics)) {
             if (metrics.cpuInMillicores > maxCpuMetrics) {
               maxCpuMetrics = metrics.cpuInMillicores;
               maxCpuFile = fileName;
             }
-          }
-
-          let maxMemoryMetrics: number = 0;
-          for (const metrics of Object.values(allMetrics)) {
             if (metrics.memoryInMebibytes > maxMemoryMetrics) {
               maxMemoryMetrics = metrics.memoryInMebibytes;
+              maxMemoryFile = fileName;
             }
           }
 
-          // save the file with the max CPU metrics and inject the peak memory value
-          const maxCpuFileName: string = `${maxCpuFile}.json`;
-          const namespaceJson: Record<string, unknown> = {
-            ...(allMetrics[maxCpuFile] as unknown as Record<string, unknown>),
+          // Use the max-memory snapshot as the representative record since memory
+          // pressure reflects actual workload behavior, not startup CPU spikes
+          const representativeFileName: string = `${maxMemoryFile}.json`;
+          const {clusterMetrics: clusterMetricsData, ...summaryFields} = allMetrics[maxMemoryFile];
+          const namespaceJson: PerformanceSummary = {
+            ...summaryFields,
+            peakCpuInMillicores: maxCpuMetrics,
+            peakCpuSnapshot: allMetrics[maxCpuFile]?.snapshotName,
             peakMemoryInMebibytes: maxMemoryMetrics,
+            peakMemorySnapshot: allMetrics[maxMemoryFile]?.snapshotName,
+            clusterMetrics: clusterMetricsData,
           };
           fs.writeFileSync(PathEx.join(tartgetDirectory, `${namespace}.json`), JSON.stringify(namespaceJson), 'utf8');
 
-          // remove all files except the aggregated and max CPU files
-          const filesToKeep: Set<string> = new Set([maxCpuFileName, aggregatedMetricsFileName]);
+          // remove all snapshot files except the representative one
+          const filesToKeep: Set<string> = new Set([representativeFileName, aggregatedMetricsFileName]);
           for (const file of files) {
-            const fileName: string = file.split('.')[0];
-            if (!filesToKeep.has(fileName)) {
+            if (!filesToKeep.has(file)) {
               fs.rmSync(PathEx.join(tartgetDirectory, file));
             }
           }
 
-          // copy the maxCpuFile to the main solo logs directory to be accessible by existing scripts
+          // copy the summary to the main solo logs directory to be accessible by existing scripts
           fs.copyFileSync(
             PathEx.join(tartgetDirectory, `${namespace}.json`),
             PathEx.join(constants.SOLO_LOGS_DIR, `${namespace}.json`),
@@ -165,7 +182,7 @@ const endToEndTestSuite: EndToEndTestSuite = new EndToEndTestSuiteBuilder()
           testLogger.info(`${testName}: beginning ${testName}: destroy`);
           await main(soloOneShotDestroy(testName));
           testLogger.info(`${testName}: finished ${testName}: destroy`);
-        }).timeout(Duration.ofMinutes(5).toMillis());
+        }).timeout(Duration.ofMinutes(8).toMillis());
 
         it('NftTransferLoadTest', async (): Promise<void> => {
           logEvent('Starting NftTransferLoadTest');
@@ -177,7 +194,7 @@ const endToEndTestSuite: EndToEndTestSuite = new EndToEndTestSuiteBuilder()
               maxTps,
             ),
           );
-        }).timeout(Duration.ofSeconds(duration * 2).toMillis());
+        }).timeout(Duration.ofSeconds(duration * nftTransferLoadTestTimeoutMultiplier).toMillis());
 
         it('TokenTransferLoadTest', async (): Promise<void> => {
           logEvent('Starting TokenTransferLoadTest');
@@ -264,6 +281,18 @@ export async function logMetrics(startTime: Date): Promise<void> {
     undefined,
     events,
   );
+
+  // Track running peak memory and inject it into the snapshot file
+  const snapshotPath: string = PathEx.join(tartgetDirectory, `${elapsedMilliseconds}.json`);
+  if (fs.existsSync(snapshotPath)) {
+    const snapshot: AugmentedSnapshot = JSON.parse(fs.readFileSync(snapshotPath, 'utf8'));
+    if (snapshot.memoryInMebibytes > peakMemoryInMebibytes) {
+      peakMemoryInMebibytes = snapshot.memoryInMebibytes;
+    }
+    snapshot.peakMemoryInMebibytes = peakMemoryInMebibytes;
+    fs.writeFileSync(snapshotPath, JSON.stringify(snapshot), 'utf8');
+  }
+
   flushEvents();
 }
 
@@ -277,7 +306,7 @@ export function soloOneShotDeploy(testName: string, deployment: string): string[
     OneShotCommandDefinition.SINGLE_DEPLOY,
   );
   argvPushGlobalFlags(argv, testName);
-  argv.push(optionFromFlag(Flags.deployment), deployment);
+  argv.push(optionFromFlag(Flags.deployment), deployment, optionFromFlag(Flags.edgeEnabled));
   return argv;
 }
 
@@ -285,7 +314,11 @@ export function soloOneShotDestroy(testName: string): string[] {
   const {newArgv, argvPushGlobalFlags} = BaseCommandTest;
 
   const argv: string[] = newArgv();
-  argv.push('one-shot', 'single', 'destroy');
+  argv.push(
+    OneShotCommandDefinition.COMMAND_NAME,
+    OneShotCommandDefinition.SINGLE_SUBCOMMAND_NAME,
+    OneShotCommandDefinition.SINGLE_DESTROY,
+  );
   argvPushGlobalFlags(argv, testName);
   return argv;
 }

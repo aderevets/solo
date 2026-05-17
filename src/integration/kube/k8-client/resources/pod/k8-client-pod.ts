@@ -53,6 +53,7 @@ export class K8ClientPod implements Pod {
     public readonly containerCommand?: string[],
     public readonly conditions?: PodCondition[],
     public readonly podIp?: string,
+    public readonly creationTimestamp?: Date,
     public readonly deletionTimestamp?: Date,
   ) {
     this.logger = container.resolve(InjectTokens.SoloLogger);
@@ -94,6 +95,7 @@ export class K8ClientPod implements Pod {
    * @param podPort The pod port to forward to
    * @param reuse - if true, reuse the port number from previous port forward operation
    * @param persist - if true, errors in port-forwarding will restart the port-forwarding, even after ts process has ended
+   * @param isRetry
    * @returns Promise resolving to the port forwarder server when not detached,
    *          or the port number (which may differ from localPort if it was in use) when detached
    */
@@ -102,9 +104,12 @@ export class K8ClientPod implements Pod {
     podPort: number,
     reuse?: boolean,
     persist: boolean = false,
+    externalAddress?: string,
     isRetry: boolean = false,
   ): Promise<number> {
     let availablePort: number = localPort;
+    const localBindAddress: string = externalAddress || constants.LOCAL_HOST;
+    const isWindows: boolean = os.platform() === 'win32';
 
     try {
       // first use http.request(url[, options][, callback]) GET method against localhost:localPort to kill any pre-existing
@@ -150,35 +155,46 @@ export class K8ClientPod implements Pod {
           );
         }
 
-        // if length of result is 1 then could not find previous port forward running, then we can use next available port
-        if (!matchedProcesses || matchedProcesses.length === 0) {
-          this.logger.warn(
-            `matching process list for port-forward returned no output: podReference: ${this.podReference.name.toString()}`,
-          );
-        }
-        if (matchedProcesses.length > 1) {
-          // extract local port number from command output
-          const splitArray: string[] = matchedProcesses[0].cmd.split(/\s+/).filter(Boolean);
+        // Reuse an existing port-forward when at least one matching process is running.
+        if (matchedProcesses.length > 0) {
+          // Extract local port number from command output.
+          // Persist mode commands can have extra trailing args (e.g. kubectl path),
+          // so do not assume the last token is local:remote.
+          const portMappingPattern: RegExp = /^(\d{1,5}):(\d{1,5})$/;
+          let parsedPort: number | undefined;
 
-          // The port number should be the last element in the command
-          // It might be in the format localPort:podPort
-          const lastElement: string = splitArray.at(-1);
-          if (lastElement === undefined) {
-            throw new SoloError(
-              `Failed to extract port: lastElement is undefined in command output: ${matchedProcesses[0].cmd}`,
-            );
+          for (const process of matchedProcesses) {
+            if (!process.cmd) {
+              continue;
+            }
+            const tokens: string[] = process.cmd.split(/\s+/).filter(Boolean);
+            for (const token of tokens) {
+              const match: RegExpMatchArray | null = token.match(portMappingPattern);
+              if (match) {
+                const localPortCandidate: number = Number.parseInt(match[1], 10);
+                if (!Number.isNaN(localPortCandidate) && localPortCandidate > 0 && localPortCandidate <= 65_535) {
+                  parsedPort = localPortCandidate;
+                  break;
+                }
+              }
+            }
+            if (parsedPort !== undefined) {
+              break;
+            }
           }
-          const extractedString: string = lastElement.split(':')[0];
-          this.logger.debug(`extractedString = ${extractedString}`);
-          const parsedPort: number = Number.parseInt(extractedString, 10);
-          if (Number.isNaN(parsedPort) || parsedPort <= 0 || parsedPort > 65_535) {
-            throw new SoloError(`Invalid port extracted: ${extractedString}.`);
-          } else {
+
+          if (parsedPort !== undefined) {
             availablePort = parsedPort;
             this.logger.info(`Reuse already enabled port ${availablePort}`);
+            // port forward already enabled
+            return availablePort;
           }
-          // port forward already enabled
-          return availablePort;
+
+          this.logger.warn(
+            `Unable to extract reusable local port from existing port-forward command(s): ${matchedProcesses
+              .map((process): string => process.cmd)
+              .join(' | ')}`,
+          );
         }
       }
 
@@ -191,7 +207,7 @@ export class K8ClientPod implements Pod {
         this.logger.showUser(chalk.yellow(`Using available port ${availablePort}`));
       }
       this.logger.debug(
-        `Creating port-forwarder for ${this.podReference.name}:${podPort} -> ${constants.LOCAL_HOST}:${availablePort}`,
+        `Creating port-forwarder for ${this.podReference.name}:${podPort} -> ${localBindAddress}:${availablePort}`,
       );
 
       this.logger.warn(
@@ -202,21 +218,28 @@ export class K8ClientPod implements Pod {
       // If the persist flag is set, we need to run the port-forward in a detached process that restarts on failure even after the typescript process ends.
       const __filename: string = fileURLToPath(import.meta.url);
       const __dirname: string = path.dirname(__filename);
-      // When running via tsx (dev/test), __filename ends in .ts; use tsx to run the .ts source.
-      // In a compiled build it ends in .js; use node to run the compiled .js.
-      const isTsx: boolean = __filename.endsWith('.ts');
-      const persistScriptExtension: string = isTsx ? '.ts' : '.js';
-      const persistCmd: string = isTsx ? 'tsx' : 'node';
-      const persistPortForwardScriptPath: string = path.resolve(
-        __dirname,
-        `persist-port-forward${persistScriptExtension}`,
-      );
 
       let cmd: string;
       let cmdArguments: string[];
       if (persist) {
+        // When running via tsx (dev/test), __filename ends in .ts; use tsx to run the .ts source.
+        // In a compiled build it ends in .js; use node to run the compiled .js.
+        const isTsx: boolean = __filename.endsWith('.ts');
+        const persistScriptExtension: string = isTsx ? '.ts' : '.js';
+        const useDirectNodeRuntime: boolean = isWindows;
+        let persistCmd: string = isTsx ? 'tsx' : 'node';
+        if (useDirectNodeRuntime) {
+          persistCmd = process.execPath;
+        }
+        const persistRuntimeArguments: string[] = useDirectNodeRuntime && isTsx ? ['--import', 'tsx'] : [];
+        const persistPortForwardScriptPath: string = path.resolve(
+          __dirname,
+          `persist-port-forward${persistScriptExtension}`,
+        );
+
         cmd = persistCmd;
         cmdArguments = [
+          ...persistRuntimeArguments,
           persistPortForwardScriptPath,
           this.podReference.namespace.name,
           `pods/${this.podReference.name}`,
@@ -224,8 +247,13 @@ export class K8ClientPod implements Pod {
           `${availablePort}:${podPort}`,
           constants.KUBECTL,
           this.kubectlInstallationDirectory,
-          '&',
         ];
+
+        // WSL2 has issues with kubectl port-forward when binding to localhost, binding to all interfaces will trigger
+        // a permission prompt which if hidden behind the terminal can cause the port-forward command to fail.
+        if (!isWindows) {
+          cmdArguments.push(localBindAddress, '&');
+        }
       } else {
         cmd = constants.KUBECTL;
         cmdArguments = [
@@ -234,38 +262,40 @@ export class K8ClientPod implements Pod {
           this.podReference.namespace.name,
           '--context',
           this.kubeConfig.currentContext,
-          `pods/${this.podReference.name}`,
-          `${availablePort}:${podPort}`,
         ];
+
+        // WSL2 has issues with kubectl port-forward when binding to localhost, binding to all interfaces will trigger
+        // a permission prompt which if hidden behind the terminal can cause the port-forward command to fail.
+        if (!isWindows) {
+          cmdArguments.push('--address', localBindAddress);
+        }
+
+        cmdArguments.push(`pods/${this.podReference.name}`, `${availablePort}:${podPort}`);
+
+        if (isWindows) {
+          cmdArguments = ['--headless', cmd, ...cmdArguments];
+          cmd = String.raw`C:\Windows\System32\conhost.exe`;
+        }
       }
 
-      if (os.platform() === 'win32') {
-        const argumentsLength: number = cmdArguments.length;
-        cmdArguments = cmdArguments.map((anArgument, index): string => {
-          if (index < argumentsLength - 1) {
-            return `"${anArgument}",`;
-          }
-          return `"${anArgument}"`;
-        });
-        cmdArguments = [
-          'Start-Process',
-          '-FilePath',
-          `"${cmd}"`,
-          '-WindowStyle',
-          'Hidden',
-          '-ArgumentList',
-          ...cmdArguments,
-        ];
-        cmd = 'powershell.exe';
-      }
+      // Don't use shell on Windows when doing persist mode to avoid argument parsing issues
+      const useShell: boolean = isWindows && persist ? false : true;
 
-      await new ShellRunner().run(cmd, cmdArguments, true, true, {
-        PATH: `${this.kubectlInstallationDirectory}${path.delimiter}${process.env.PATH}`,
-      });
+      await new ShellRunner().run(
+        cmd,
+        cmdArguments,
+        true,
+        true,
+        {
+          PATH: `${this.kubectlInstallationDirectory}${path.delimiter}${process.env.PATH}`,
+        },
+        undefined,
+        useShell,
+      );
 
       return availablePort;
     } catch (error) {
-      if (os.platform() === 'win32' && !isRetry && error?.message?.includes('listen EACCES')) {
+      if (isWindows && !isRetry && error?.message?.includes('listen EACCES')) {
         // handle the case where port forwarding fails on Windows due to an issue with the WinNAT service.
         // Restarting the WinNAT service can resolve the issue, and then we can retry starting the port forwarder.
         // Example: listen EACCES: permission denied 127.0.0.1:50211
@@ -283,10 +313,10 @@ export class K8ClientPod implements Pod {
         await new ShellRunner().run('net start winnat');
         this.logger.warn('Restarted WinNAT service to recover from port forwarding failure on Windows');
         await sleep(Duration.ofSeconds(5)); // wait a bit for the service to restart before retrying
-        return await this.portForward(localPort, podPort, reuse, persist, true);
+        return await this.portForward(localPort, podPort, reuse, persist, externalAddress, true);
       }
 
-      const message: string = `failed to start port-forwarder [${this.podReference.name}:${podPort} -> ${constants.LOCAL_HOST}:${availablePort}]: ${error.message}`;
+      const message: string = `failed to start port-forwarder [${this.podReference.name}:${podPort} -> ${localBindAddress}:${availablePort}]: ${error.message}`;
       throw new SoloError(message, error);
     }
   }
@@ -418,6 +448,7 @@ export class K8ClientPod implements Pod {
         (condition): K8ClientPodCondition => new K8ClientPodCondition(condition.type, condition.status),
       ),
       v1Pod.status?.podIP,
+      v1Pod.metadata?.creationTimestamp ? new Date(v1Pod.metadata.creationTimestamp) : undefined,
       v1Pod.metadata.deletionTimestamp ? new Date(v1Pod.metadata.deletionTimestamp) : undefined,
     );
   }

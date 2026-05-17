@@ -148,6 +148,17 @@ export class Flags {
     prompt: undefined,
   };
 
+  public static readonly check: CommandFlag = {
+    constName: 'check',
+    name: 'check',
+    definition: {
+      describe: 'Fail if any configured remote port-forward is not reachable locally',
+      defaultValue: false,
+      type: 'boolean',
+    },
+    prompt: undefined,
+  };
+
   public static readonly predefinedAccounts: CommandFlag = {
     constName: 'predefinedAccounts',
     name: 'predefined-accounts',
@@ -166,6 +177,16 @@ export class Flags {
       describe: 'Force port forward to access the network services',
       defaultValue: true, // always use local port-forwarding by default
       type: 'boolean',
+    },
+    prompt: undefined,
+  };
+
+  public static readonly externalAddress: CommandFlag = {
+    constName: 'externalAddress',
+    name: 'external-address',
+    definition: {
+      describe: 'Bind address for kubectl port-forward (for example 127.0.0.1 or 0.0.0.0)',
+      type: 'string',
     },
     prompt: undefined,
   };
@@ -366,6 +387,17 @@ export class Flags {
     },
   };
 
+  public static readonly deployMetricsServer: CommandFlag = {
+    constName: 'deployMetricsServer',
+    name: 'metrics-server',
+    definition: {
+      describe: 'Deploy metrics server to enable kubectl top for CPU and memory usage monitoring',
+      defaultValue: false,
+      type: 'boolean',
+    },
+    prompt: undefined,
+  };
+
   public static readonly deployCertManager: CommandFlag = {
     constName: 'deployCertManager',
     name: 'cert-manager',
@@ -492,6 +524,18 @@ export class Flags {
       describe: 'The Docker image tag to override what is in the Helm Chart',
       defaultValue: '',
       type: 'string',
+    },
+    prompt: undefined,
+  };
+
+  public static readonly componentImage: CommandFlag = {
+    constName: 'componentImage',
+    name: 'component-image',
+    definition: {
+      describe: 'Full Docker image reference override (e.g. ghcr.io/org/image:tag, docker.io/library/redis:7, redis:7)',
+      defaultValue: '',
+      type: 'string',
+      alias: 'relay-image',
     },
     prompt: undefined,
   };
@@ -721,7 +765,13 @@ export class Flags {
     constName: 'mirrorNodeChartDirectory',
     name: 'mirror-node-chart-dir',
     definition: {
-      describe: 'Mirror node local chart directory path (e.g. ~/hiero-mirror-node/charts)',
+      describe:
+        'Mirror node local chart directory path (e.g. ~/hiero-mirror-node/charts). ' +
+        'NOTE: This only provides the Helm chart templates — it does NOT make the chart images available to the cluster. ' +
+        'All container images referenced by the chart must already be pullable (e.g. published to a registry or loaded ' +
+        'into the cluster with `kind load docker-image`). Using a local branch chart with SNAPSHOT image tags will ' +
+        'cause pods to fail with ImagePullBackOff unless those images have been built and pushed to a registry or ' +
+        'loaded into the cluster.',
       defaultValue: '',
       type: 'string',
     },
@@ -1224,7 +1274,7 @@ export class Flags {
     name: 'application-properties',
     definition: {
       describe: 'application.properties file for node',
-      defaultValue: PathEx.join('templates', 'application.properties'),
+      defaultValue: PathEx.join('templates', constants.APPLICATION_PROPERTIES),
       type: 'string',
     },
     prompt: undefined,
@@ -1314,7 +1364,7 @@ export class Flags {
     name: 'local-build-path',
     definition: {
       describe: 'path of hedera local repo',
-      defaultValue: '',
+      defaultValue: constants.getEnvironmentVariable('SOLO_LOCAL_BUILD_PATH') || '',
       type: 'string',
     },
     prompt: undefined,
@@ -2910,6 +2960,8 @@ export class Flags {
     prompt: undefined,
   };
 
+  // Every static CommandFlag defined in this class must be listed here.
+  // Helpers derive behavior from allFlags/allFlagsMap, so new flags are incomplete until registered in this array.
   public static readonly allFlags: CommandFlag[] = [
     Flags.accountId,
     Flags.fileId,
@@ -2925,6 +2977,7 @@ export class Flags {
     Flags.bootstrapProperties,
     Flags.cacheDir,
     Flags.chainId,
+    Flags.check,
 
     //* Chart directories
     Flags.chartDirectory,
@@ -2944,6 +2997,7 @@ export class Flags {
     Flags.deployCertManagerCrds,
     Flags.deployJsonRpcRelay,
     Flags.deployMinio,
+    Flags.deployMetricsServer,
     Flags.deployPrometheusStack,
     Flags.deployment,
     Flags.deploymentClusters,
@@ -2955,7 +3009,9 @@ export class Flags {
     Flags.enableTimeout,
     Flags.endpointType,
     Flags.envoyIps,
+    Flags.force,
     Flags.forcePortForward,
+    Flags.externalAddress,
     Flags.generateEcdsaKey,
     Flags.generateGossipKeys,
     Flags.generateTlsKeys,
@@ -2998,6 +3054,7 @@ export class Flags {
     Flags.quiet,
     Flags.output,
     Flags.imageTag,
+    Flags.componentImage,
     Flags.relayReleaseTag,
     Flags.releaseTag,
     Flags.upgradeVersion,
@@ -3157,5 +3214,14 @@ export class Flags {
     }
 
     return processedFlags.join(' ');
+  }
+
+  /**
+   * Returns the full flag key with '--' prefix for a given CommandFlag
+   * @param flag - the CommandFlag for which to get the formatted flag key
+   * @returns the formatted flag key as a string (e.g. '--flag-name')
+   */
+  public static getFormattedFlagKey(flag: CommandFlag): string {
+    return `--${flag.name}`;
   }
 }

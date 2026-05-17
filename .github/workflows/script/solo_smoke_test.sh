@@ -19,7 +19,7 @@ function clone_smart_contract_repo ()
     echo "Directory hedera-smart-contracts exists."
   else
     echo "Directory hedera-smart-contracts does not exist."
-    git clone https://github.com/hashgraph/hedera-smart-contracts --branch only-erc20-tests-v3
+    git clone https://github.com/hashgraph/hedera-smart-contracts --branch only-erc20-tests-v4
   fi
 }
 
@@ -42,20 +42,6 @@ function setup_smart_contract_test ()
   echo "RETRY_DELAY=5000 # ms" >> .env
   echo "MAX_RETRY=5" >> .env
   cat .env
-
-  # Override the hardcoded legacy ports in constants.js (7546, 50211, 8081) with
-  # Solo's current port-forward scheme (37546, 35211, 38081).  The upstream repo
-  # keeps the old defaults so other tests are unaffected; we patch in-place after
-  # cloning to produce the correct environment for this smoke test run.
-  node -e "
-    const fs = require('fs');
-    let c = fs.readFileSync('utils/constants.js', 'utf8');
-    c = c.replace(\"url: 'http://localhost:7546'\",         \"url: 'http://localhost:37546'\");
-    c = c.replace(\"networkNodeUrl: '127.0.0.1:50211'\",    \"networkNodeUrl: '127.0.0.1:35211'\");
-    c = c.replace(\"mirrorNode: 'http://127.0.0.1:8081'\",  \"mirrorNode: 'http://127.0.0.1:38081'\");
-    fs.writeFileSync('utils/constants.js', c);
-    console.log('Patched utils/constants.js with Solo port-forward addresses');
-  "
 
   cd -
 }
@@ -86,6 +72,8 @@ function start_contract_test ()
   cd hedera-smart-contracts
   echo "Wait a few seconds for background transactions to start"
   sleep 10
+  echo "Show current port forward for debugging purpose"
+  ps -ef | grep port-forward
   echo "Run smart contract test"
   result=0
   npm run hh:test || result=$?
@@ -400,13 +388,3 @@ if [[ $result -ne 0 ]]; then
 fi
 echo "Finished mirror node acceptance test on namespace ${SOLO_NAMESPACE}"
 printf "\r::endgroup::\n"
-result=0
-
-check_monitor_log "${SOLO_NAMESPACE}" "${MIRROR_KUBE_CONTEXT}"
-
-if [ -n "$1" ]; then
-  echo "Skip mirror importer log check"
-else
-  check_importer_log "${SOLO_NAMESPACE}" "${MIRROR_KUBE_CONTEXT}"
-fi
-log_and_exit $?

@@ -20,7 +20,20 @@ import {KubeConfig} from '@kubernetes/client-node';
 import sinon from 'sinon';
 import {PathEx} from '../../../src/business/utils/path-ex.js';
 import {type LocalConfigRuntimeState} from '../../../src/business/runtime-state/config/local/local-config-runtime-state.js';
-import {type AnyObject} from '../../../src/types/aliases.js';
+import {type AnyObject, type NodeAlias, type NodeAliases} from '../../../src/types/aliases.js';
+import * as constants from '../../../src/core/constants.js';
+import {Address} from '../../../src/business/address/address.js';
+
+function invokeExtractSavedEndpoint(
+  manager: ProfileManager,
+  consensusNode: ConsensusNode,
+  nodeSequence: number,
+): Promise<Address | undefined> {
+  const extractSavedEndpoint: (node: ConsensusNode, nodeSequence: number) => Promise<Address | undefined> = (
+    manager as unknown as Record<string, (node: ConsensusNode, nodeSequence: number) => Promise<Address | undefined>>
+  ).extractSavedEndpoint;
+  return extractSavedEndpoint.call(manager, consensusNode, nodeSequence);
+}
 
 describe('ProfileManager', (): void => {
   let temporaryDirectory: string, configManager: ConfigManager, profileManager: ProfileManager, cacheDirectory: string;
@@ -137,10 +150,13 @@ describe('ProfileManager', (): void => {
         fs.cpSync(sourceDirectory, destinationDirectory, {recursive: true});
       }
 
-      const applicationPropertiesFile: string = PathEx.join(cacheDirectory, 'templates', 'application.properties');
+      const applicationPropertiesFile: string = PathEx.join(
+        cacheDirectory,
+        'templates',
+        constants.APPLICATION_PROPERTIES,
+      );
       const valuesFileMapping: Record<string, string> = await profileManager.prepareValuesForSoloChart(
         consensusNodes,
-        {},
         deploymentName,
         applicationPropertiesFile,
       );
@@ -162,11 +178,14 @@ describe('ProfileManager', (): void => {
       fs.writeFileSync(file, fileContents);
       configManager.setFlag(flags.applicationEnv, file);
       const destinationFile: string = PathEx.join(stagingDirectory, 'templates', 'application.env');
-      const applicationPropertiesFile: string = PathEx.join(stagingDirectory, 'templates', 'application.properties');
+      const applicationPropertiesFile: string = PathEx.join(
+        stagingDirectory,
+        'templates',
+        constants.APPLICATION_PROPERTIES,
+      );
       fs.cpSync(file, destinationFile, {force: true});
       const cachedValuesFileMapping: Record<string, string> = await profileManager.prepareValuesForSoloChart(
         consensusNodes,
-        {},
         deploymentName,
         applicationPropertiesFile,
       );
@@ -180,6 +199,231 @@ describe('ProfileManager', (): void => {
     it('should write and return the path to the config.txt file', async (): Promise<void> => {
       const destinationPath: string = PathEx.join(temporaryDirectory, 'staging');
       fs.mkdirSync(destinationPath, {recursive: true});
+    });
+  });
+
+  describe('saved endpoint extraction', (): void => {
+    afterEach((): void => {
+      sinon.restore();
+    });
+
+    it('reuses saved domainName endpoint from network.json', async (): Promise<void> => {
+      const savedDomainName: string = 'network-node1-svc.test-namespace.svc.cluster.local';
+      const networkJsonContent: string = JSON.stringify({
+        nodeMetadata: [{rosterEntry: {gossipEndpoint: [{port: 50_211, domainName: savedDomainName}]}}],
+      });
+
+      const getK8Stub: sinon.SinonStub = sinon.stub().returns({
+        pods: (): {list: () => Promise<Array<{podReference: unknown}>>} => ({
+          list: async (): Promise<Array<{podReference: unknown}>> => [{podReference: {}}],
+        }),
+        containers: (): {readByRef: () => {execContainer: () => Promise<string>}} => ({
+          readByRef: (): {execContainer: () => Promise<string>} => ({
+            execContainer: async (): Promise<string> => networkJsonContent,
+          }),
+        }),
+      });
+      sinon
+        .stub(
+          (profileManager as unknown as {k8Factory: {getK8: (...arguments_: unknown[]) => unknown}}).k8Factory,
+          'getK8',
+        )
+        .callsFake(getK8Stub);
+
+      const savedAddress: Address | undefined = await invokeExtractSavedEndpoint(profileManager, consensusNodes[0], 0);
+      expect(savedAddress).to.not.be.undefined;
+      expect(savedAddress?.hostString()).to.equal(savedDomainName);
+      expect(savedAddress?.port).to.equal(50_211);
+    });
+
+    it('decodes saved ipAddressV4 and validates it against the expected node service', async (): Promise<void> => {
+      const savedIpAddress: string = '10.1.2.3';
+      const encodedIpAddress: string = Buffer.from([10, 1, 2, 3]).toString('base64');
+      const networkJsonContent: string = JSON.stringify({
+        nodeMetadata: [{rosterEntry: {gossipEndpoint: [{port: 50_211, ipAddressV4: encodedIpAddress}]}}],
+      });
+      const serviceReadStub: sinon.SinonStub = sinon.stub().resolves({spec: {clusterIP: savedIpAddress}});
+      const getK8Stub: sinon.SinonStub = sinon.stub().returns({
+        pods: (): {list: () => Promise<Array<{podReference: unknown}>>} => ({
+          list: async (): Promise<Array<{podReference: unknown}>> => [{podReference: {}}],
+        }),
+        containers: (): {readByRef: () => {execContainer: () => Promise<string>}} => ({
+          readByRef: (): {execContainer: () => Promise<string>} => ({
+            execContainer: async (): Promise<string> => networkJsonContent,
+          }),
+        }),
+        services: (): {read: sinon.SinonStub} => ({
+          read: serviceReadStub,
+        }),
+      });
+      sinon
+        .stub(
+          (profileManager as unknown as {k8Factory: {getK8: (...arguments_: unknown[]) => unknown}}).k8Factory,
+          'getK8',
+        )
+        .callsFake(getK8Stub);
+
+      const savedAddress: Address | undefined = await invokeExtractSavedEndpoint(profileManager, consensusNodes[0], 0);
+      expect(savedAddress).to.not.be.undefined;
+      expect(savedAddress?.hostString()).to.equal(savedIpAddress);
+      expect(serviceReadStub.calledOnce).to.equal(true);
+      expect(serviceReadStub.firstCall.args[1]).to.equal('network-node1-svc');
+    });
+
+    it('falls back to current external address when saved endpoint is not reusable', async (): Promise<void> => {
+      const destinationPath: string = PathEx.join(temporaryDirectory, 'config-fallback');
+      fs.mkdirSync(destinationPath, {recursive: true});
+
+      const extractSavedEndpointStub: sinon.SinonStub = sinon
+        .stub(
+          profileManager as unknown as {
+            extractSavedEndpoint: (consensusNode: ConsensusNode, nodeSeq: number) => Promise<Address | undefined>;
+          },
+          'extractSavedEndpoint',
+        )
+        .resolves();
+
+      const externalAddressStub: sinon.SinonStub = sinon
+        .stub(Address, 'getExternalAddress')
+        .resolves(new Address(50_211, 'fallback-node1.test'));
+
+      const nodeAccountMap: Map<NodeAlias, string> = new Map([[consensusNodes[0].name as NodeAlias, '0.0.3']]);
+      const configTxtPath: string = await profileManager.prepareConfigTxt(
+        nodeAccountMap,
+        [consensusNodes[0]],
+        destinationPath,
+        version.HEDERA_PLATFORM_VERSION,
+        constants.HEDERA_APP_NAME,
+        constants.HEDERA_CHAIN_ID,
+        false,
+      );
+
+      expect(extractSavedEndpointStub.calledOnce).to.equal(true);
+      expect(externalAddressStub.calledOnce).to.equal(true);
+      expect(externalAddressStub.firstCall.args[3]).to.equal(false);
+      expect(fs.readFileSync(configTxtPath, 'utf8')).to.contain('fallback-node1.test, 50211');
+    });
+  });
+
+  describe('chainId updates', (): void => {
+    it('should update contracts.chainId in application.properties', async (): Promise<void> => {
+      const applicationPropertiesPath: string = PathEx.join(temporaryDirectory, constants.APPLICATION_PROPERTIES);
+      fs.writeFileSync(
+        applicationPropertiesPath,
+        ['hedera.realm=0', 'contracts.chainId=295', 'hedera.shard=0'].join('\n') + '\n',
+        'utf8',
+      );
+
+      // @ts-expect-error to access private method
+      await profileManager.updateApplicationPropertiesWithChainId(applicationPropertiesPath, '296');
+
+      const updated: string = fs.readFileSync(applicationPropertiesPath, 'utf8');
+      expect(updated).to.contain('contracts.chainId=296');
+      expect(updated).not.to.contain('contracts.chainId=295');
+    });
+
+    it('should update contracts.chainId in bootstrap.properties', async (): Promise<void> => {
+      const bootstrapPropertiesPath: string = PathEx.join(temporaryDirectory, 'bootstrap.properties');
+      fs.writeFileSync(
+        bootstrapPropertiesPath,
+        ['foo=bar', 'contracts.chainId=295', 'baz=qux'].join('\n') + '\n',
+        'utf8',
+      );
+
+      // @ts-expect-error to access private method
+      await profileManager.updateBoostrapPropertiesWithChainId(bootstrapPropertiesPath, '296');
+
+      const updated: string = fs.readFileSync(bootstrapPropertiesPath, 'utf8');
+      expect(updated).to.contain('contracts.chainId=296');
+      expect(updated).not.to.contain('contracts.chainId=295');
+    });
+
+    it('prepareStagingDirectory should update chainId in staged application.properties and bootstrap.properties', async (): Promise<void> => {
+      const yamlRoot: AnyObject = {};
+      const nodeAliases: NodeAliases = ['node1', 'node2', 'node3'];
+      const sourceDirectory: string = PathEx.join(temporaryDirectory, 'source-files');
+      fs.mkdirSync(sourceDirectory, {recursive: true});
+
+      const applicationPropertiesSourcePath: string = PathEx.join(sourceDirectory, constants.APPLICATION_PROPERTIES);
+      const bootstrapPropertiesSourcePath: string = PathEx.join(sourceDirectory, 'bootstrap.properties');
+      // eslint-disable-next-line unicorn/prevent-abbreviations
+      const applicationEnvSourcePath: string = PathEx.join(sourceDirectory, 'application.env');
+      const apiPermissionSourcePath: string = PathEx.join(sourceDirectory, 'api-permission.properties');
+      // eslint-disable-next-line unicorn/prevent-abbreviations
+      const log4j2SourcePath: string = PathEx.join(sourceDirectory, 'log4j2.xml');
+      const settingsSourcePath: string = PathEx.join(sourceDirectory, 'settings.txt');
+
+      fs.writeFileSync(
+        applicationPropertiesSourcePath,
+        ['hedera.realm=0', 'hedera.shard=0', 'contracts.chainId=295'].join('\n') + '\n',
+        'utf8',
+      );
+      fs.writeFileSync(
+        bootstrapPropertiesSourcePath,
+        ['contracts.chainId=295', 'some.other.value=true'].join('\n') + '\n',
+        'utf8',
+      );
+      fs.writeFileSync(applicationEnvSourcePath, 'ENV_ONE=value1\n', 'utf8');
+      fs.writeFileSync(apiPermissionSourcePath, 'dummy.permission=true\n', 'utf8');
+      fs.writeFileSync(log4j2SourcePath, '<Configuration />\n', 'utf8');
+      fs.writeFileSync(settingsSourcePath, 'swirld, 123\n', 'utf8');
+
+      configManager.setFlag(flags.applicationProperties, applicationPropertiesSourcePath);
+      configManager.setFlag(flags.bootstrapProperties, bootstrapPropertiesSourcePath);
+      configManager.setFlag(flags.applicationEnv, applicationEnvSourcePath);
+      configManager.setFlag(flags.apiPermissionProperties, apiPermissionSourcePath);
+      configManager.setFlag(flags.log4j2Xml, log4j2SourcePath);
+      configManager.setFlag(flags.settingTxt, settingsSourcePath);
+      configManager.setFlag(flags.chainId, '296');
+
+      // @ts-expect-error to access private property
+      sinon.stub(profileManager.accountManager, 'getNodeAccountMap').returns(
+        new Map([
+          ['node1', '0.0.3'],
+          ['node2', '0.0.4'],
+          ['node3', '0.0.5'],
+        ]),
+      );
+
+      // @ts-expect-error to access private property
+      sinon.stub(profileManager.localConfig.configuration, 'realmForDeployment').returns(0);
+      // @ts-expect-error to access private property
+      sinon.stub(profileManager.localConfig.configuration, 'shardForDeployment').returns(0);
+
+      await profileManager.prepareStagingDirectory(
+        consensusNodes,
+        nodeAliases,
+        yamlRoot,
+        deploymentName,
+        applicationPropertiesSourcePath,
+        {
+          cacheDir: cacheDirectory,
+          releaseTag: version.HEDERA_PLATFORM_VERSION,
+          appName: 'HederaNode.jar',
+          chainId: '296',
+        },
+      );
+
+      const stagedApplicationPropertiesPath: string = PathEx.join(
+        stagingDirectory,
+        'templates',
+        constants.APPLICATION_PROPERTIES,
+      );
+      const stagedBootstrapPropertiesPath: string = PathEx.join(stagingDirectory, 'templates', 'bootstrap.properties');
+
+      const stagedApplicationProperties: string = fs.readFileSync(stagedApplicationPropertiesPath, 'utf8');
+      const stagedBootstrapProperties: string = fs.readFileSync(stagedBootstrapPropertiesPath, 'utf8');
+
+      expect(stagedApplicationProperties).to.contain('contracts.chainId=296');
+      expect(stagedApplicationProperties).not.to.contain('contracts.chainId=295');
+
+      expect(stagedBootstrapProperties).to.contain('contracts.chainId=296');
+      expect(stagedBootstrapProperties).not.to.contain('contracts.chainId=295');
+
+      expect(yamlRoot.hedera.configMaps.applicationProperties).to.contain('contracts.chainId=296');
+      expect(yamlRoot.hedera.configMaps.bootstrapProperties).to.contain('contracts.chainId=296');
+
+      sinon.restore();
     });
   });
 });

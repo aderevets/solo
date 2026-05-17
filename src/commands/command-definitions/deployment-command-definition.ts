@@ -57,12 +57,15 @@ export class DeploymentCommandDefinition extends BaseCommandDefinition {
   public static readonly CONFIG_CREATE: string = 'create';
   public static readonly CONFIG_DELETE: string = 'delete';
   public static readonly CONFIG_INFO: string = 'info';
+  public static readonly CONFIG_PORTS: string = 'ports';
 
   public static readonly DIAGNOSTICS_ALL: string = 'all';
   public static readonly DIAGNOSTICS_ANALYZE: string = 'analyze';
   public static readonly DIAGNOSTICS_DEBUG: string = 'debug';
   public static readonly DIAGNOSTICS_LOGS: string = 'logs';
   public static readonly DIAGNOSTICS_CONNECTIONS: string = 'connections';
+  public static readonly DIAGNOSTICS_REPORT: string = 'report';
+  public static readonly REFRESH_PORT_FORWARDS: string = 'port-forwards';
 
   public static readonly CREATE_COMMAND: string =
     `${DeploymentCommandDefinition.COMMAND_NAME} ${DeploymentCommandDefinition.CONFIG_SUBCOMMAND_NAME} ${DeploymentCommandDefinition.CONFIG_CREATE}` as const;
@@ -77,7 +80,7 @@ export class DeploymentCommandDefinition extends BaseCommandDefinition {
     `${DeploymentCommandDefinition.COMMAND_NAME} ${DeploymentCommandDefinition.DIAGNOSTICS_SUBCOMMAND_NAME} ${DeploymentCommandDefinition.DIAGNOSTICS_CONNECTIONS}` as const;
 
   public static readonly REFRESH_COMMAND: string =
-    `${DeploymentCommandDefinition.COMMAND_NAME} ${DeploymentCommandDefinition.REFRESH_SUBCOMMAND_NAME} port-forwards` as const;
+    `${DeploymentCommandDefinition.COMMAND_NAME} ${DeploymentCommandDefinition.REFRESH_SUBCOMMAND_NAME} ${DeploymentCommandDefinition.REFRESH_PORT_FORWARDS}` as const;
 
   public getCommandDefinition(): CommandDefinition {
     return new CommandBuilder(
@@ -142,6 +145,16 @@ export class DeploymentCommandDefinition extends BaseCommandDefinition {
               this.deploymentCommand,
               this.deploymentCommand.showDeploymentStatus,
               DeploymentCommand.SHOW_STATUS_FLAGS_LIST,
+              [],
+            ),
+          )
+          .addSubcommand(
+            new Subcommand(
+              DeploymentCommandDefinition.CONFIG_PORTS,
+              'List all port-forwards for a deployment. JSON and YAMl output formats, create files containing the data',
+              this.deploymentCommand,
+              this.deploymentCommand.ports,
+              DeploymentCommand.PORTS_FLAGS_LIST,
               [],
             ),
           ),
@@ -209,6 +222,15 @@ export class DeploymentCommandDefinition extends BaseCommandDefinition {
               this.nodeCommand.handlers,
               this.nodeCommand.handlers.analyze,
               NodeFlags.ANALYZE_FLAGS,
+            ),
+          )
+          .addSubcommand(
+            new Subcommand(
+              DeploymentCommandDefinition.DIAGNOSTICS_REPORT,
+              'Collect diagnostic logs and create a GitHub issue using the gh CLI.',
+              this.nodeCommand.handlers,
+              this.nodeCommand.handlers.report,
+              NodeFlags.REPORT_FLAGS,
             ),
           ),
       )

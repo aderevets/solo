@@ -39,6 +39,7 @@ export class MirrorNodeTest extends BaseCommandTest {
     deployment: DeploymentName,
     clusterReference: ClusterReferenceName,
     pinger: boolean,
+    valuesFile?: string,
   ): string[] {
     const {newArgv, argvPushGlobalFlags, optionFromFlag} = MirrorNodeTest;
 
@@ -56,6 +57,10 @@ export class MirrorNodeTest extends BaseCommandTest {
 
     if (pinger) {
       argv.push(optionFromFlag(Flags.pinger));
+    }
+
+    if (valuesFile) {
+      argv.push(optionFromFlag(Flags.valuesFile), valuesFile);
     }
 
     argvPushGlobalFlags(argv, testName, true, true);
@@ -236,18 +241,26 @@ export class MirrorNodeTest extends BaseCommandTest {
       expect(secondData.transactions).to.not.be.undefined;
       expect(secondData.transactions.length).to.be.gt(0);
 
-      // if pinger is enabled, the first transaction in the first response should not equal the first transaction in the second response
-      // if pinger is disabled, the first transaction in the first response should equal the first transaction in the second response
-      // if there is more than one transaction in the second response, compare to the second transaction instead of the first
-      let secondTransactionIndex: number = 0;
-      if (secondData.transactions.length > 1) {
-        secondTransactionIndex = 1;
-      }
-
       if (pingerIsEnabled) {
-        expect(firstData.transactions[0]).to.not.deep.equal(secondData.transactions[secondTransactionIndex]);
+        // Compare snapshots as sets so the check is resilient when the top row remains the same.
+        const firstSnapshotTxIds: Set<string> = new Set(
+          firstData.transactions
+            .map((transaction: {transaction_id?: string}): string | undefined => transaction?.transaction_id)
+            .filter((transactionId: string | undefined): transactionId is string => !!transactionId),
+        );
+        const secondSnapshotHasNewTx: boolean = secondData.transactions.some(
+          (transaction: {transaction_id?: string}): boolean => {
+            const transactionId: string | undefined = transaction?.transaction_id;
+            return !!transactionId && !firstSnapshotTxIds.has(transactionId);
+          },
+        );
+
+        expect(
+          secondSnapshotHasNewTx,
+          'expected second mirror snapshot to include at least one new transaction id when pinger is enabled',
+        ).to.equal(true);
       } else {
-        expect(firstData.transactions[0]).to.deep.equal(secondData.transactions[secondTransactionIndex]);
+        expect(firstData.transactions[0]).to.deep.equal(secondData.transactions[0]);
       }
     } finally {
       if (portForwarder) {
@@ -267,11 +280,12 @@ export class MirrorNodeTest extends BaseCommandTest {
       createdAccountIds,
       consensusNodesCount,
       pinger,
+      valuesFile,
     } = options;
     const {soloMirrorNodeDeployArgv, verifyMirrorNodeDeployWasSuccessful, verifyPingerStatus} = MirrorNodeTest;
 
     it(`${testName}: mirror node add`, async (): Promise<void> => {
-      await main(soloMirrorNodeDeployArgv(testName, deployment, clusterReferenceNameArray[1], pinger));
+      await main(soloMirrorNodeDeployArgv(testName, deployment, clusterReferenceNameArray[1], pinger, valuesFile));
       await verifyMirrorNodeDeployWasSuccessful(
         contexts,
         namespace,
@@ -358,12 +372,19 @@ export class MirrorNodeTest extends BaseCommandTest {
       createdAccountIds,
       consensusNodesCount,
       pinger,
+      valuesFile,
     } = options;
     const {soloMirrorNodeDeployArgv, verifyMirrorNodeDeployWasSuccessful, verifyPingerStatus, optionFromFlag} =
       MirrorNodeTest;
 
     it(`${testName}: mirror node deploy with external database`, async (): Promise<void> => {
-      const argv: string[] = soloMirrorNodeDeployArgv(testName, deployment, clusterReferenceNameArray[1], pinger);
+      const argv: string[] = soloMirrorNodeDeployArgv(
+        testName,
+        deployment,
+        clusterReferenceNameArray[1],
+        pinger,
+        valuesFile,
+      );
 
       process.env.USE_MIRROR_NODE_LEGACY_RELEASE_NAME = 'true';
 
@@ -463,25 +484,26 @@ export class MirrorNodeTest extends BaseCommandTest {
   }
 
   public static pullAddressBook(options: BaseTestOptions): void {
+    const {consensusNodesCount} = options;
     it('should pull address book from mirror node', async (): Promise<void> => {
       const srv: number = await MirrorNodeTest.forwardRestServicePort(options.contexts, options.namespace);
 
       const stdOut: string[] = await new ShellRunner().run(`curl http://localhost:${srv}/api/v1/network/nodes`);
 
-      const addressBook: AnyObject = JSON.parse(stdOut[0]);
+      const addressBook: AnyObject = JSON.parse(stdOut.join(''));
 
       expect(addressBook.nodes.length).to.be.greaterThan(0);
 
-      const node1: AnyObject = addressBook.nodes.find((node: AnyObject): boolean => node.node_id === 0);
+      // Validate first alpha node (always node1, node_id=0).
+      const alphaNode: AnyObject = addressBook.nodes.find((node: AnyObject): boolean => node.node_id === 0);
+      expect(alphaNode.grpc_proxy_endpoint.domain_name).to.equal(ConsensusNodeTest.alphaClusterGrpcWebAddress);
+      expect(alphaNode.grpc_proxy_endpoint.port).to.equal(ConsensusNodeTest.baseGrpcWebPort);
 
-      // Validate Node 1 data
-      expect(node1.grpc_proxy_endpoint.domain_name).to.equal(ConsensusNodeTest.firstNodeCustomGrpcWebEndpointAddress);
-      expect(node1.grpc_proxy_endpoint.port).to.equal(ConsensusNodeTest.firstNodeCustomGrpcWebEndpointPort);
-
-      const node2: AnyObject = addressBook.nodes.find((node: AnyObject): boolean => node.node_id === 1);
-      // Validate Node 2 data
-      expect(node2.grpc_proxy_endpoint.domain_name).to.equal(ConsensusNodeTest.secondNodeCustomGrpcWebEndpointAddress);
-      expect(node2.grpc_proxy_endpoint.port).to.equal(ConsensusNodeTest.secondNodeCustomGrpcWebEndpointPort);
+      // Validate first beta node (node_id = ceil(N/2), i.e. the first node in cluster-beta).
+      const alphaCount: number = Math.ceil(consensusNodesCount / 2);
+      const betaNode: AnyObject = addressBook.nodes.find((node: AnyObject): boolean => node.node_id === alphaCount);
+      expect(betaNode.grpc_proxy_endpoint.domain_name).to.equal(ConsensusNodeTest.betaClusterGrpcWebAddress);
+      expect(betaNode.grpc_proxy_endpoint.port).to.equal(ConsensusNodeTest.baseGrpcWebPort + alphaCount);
 
       await MirrorNodeTest.stopPortForward(options.contexts, srv);
     });

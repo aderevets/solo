@@ -327,7 +327,7 @@ export class IntervalLock implements Lock {
    * @returns true if the lock is acquired and not expired; otherwise, false.
    */
   async isAcquired(): Promise<boolean> {
-    const lease = await this.retrieveLease();
+    const lease: Lease | undefined = await this.retrieveLease();
     return !!lease && !IntervalLock.checkExpiration(lease) && this.heldBySameProcess(lease);
   }
 
@@ -338,7 +338,7 @@ export class IntervalLock implements Lock {
    * @returns true if the lock is expired; otherwise, false.
    */
   async isExpired(): Promise<boolean> {
-    const lease = await this.retrieveLease();
+    const lease: Lease | undefined = await this.retrieveLease();
     return !!lease && IntervalLock.checkExpiration(lease);
   }
 
@@ -382,22 +382,86 @@ export class IntervalLock implements Lock {
         // handles the condition for creating a lease on cluster setup which may not have a namespace created yet
         await this.k8Factory.default().namespaces().create(this.namespace);
       }
-      await (lease
-        ? this.k8Factory.default().leases().renew(this.namespace, this.leaseName, lease)
-        : this.k8Factory
-            .default()
-            .leases()
-            .create(this.namespace, this.leaseName, this.lockHolder.toJson(), this.durationSeconds));
+      if (lease) {
+        try {
+          await this.k8Factory.default().leases().renew(this.namespace, this.leaseName, lease);
+        } catch (error) {
+          if (!(await this.shouldIgnoreRenewConflict(error))) {
+            throw error;
+          }
+        }
+      } else {
+        await this.k8Factory
+          .default()
+          .leases()
+          .create(this.namespace, this.leaseName, this.lockHolder.toJson(), this.durationSeconds);
+      }
 
       if (!this.scheduleId) {
         this.scheduleId = await this.renewalService.schedule(this);
       }
     } catch (error) {
+      if (this.scheduleId && IntervalLock.hasStatusCode(error, StatusCodes.FORBIDDEN)) {
+        // A 403 during renewal most likely means the namespace is being terminated.
+        // Cancel the renewal schedule and return gracefully instead of propagating the error.
+        container
+          .resolve<SoloLogger>(InjectTokens.SoloLogger)
+          .info(
+            `lease '${this.leaseName}' renewal forbidden in namespace '${this.namespace}'; namespace may be terminating, stopping renewal`,
+          );
+        await this.renewalService.cancel(this.scheduleId);
+        this.scheduleId = null;
+        return;
+      }
       throw new LockAcquisitionError(
         `failed to create or renew the lease named '${this.leaseName}' in the ` + `'${this.namespace}' namespace`,
         error,
       );
     }
+  }
+
+  /**
+   * Determines if a renew conflict can be safely ignored.
+   *
+   * @param error - the renew error to evaluate.
+   * @returns true if the conflict should be ignored; otherwise, false.
+   */
+  private async shouldIgnoreRenewConflict(error: unknown): Promise<boolean> {
+    if (!IntervalLock.hasStatusCode(error, StatusCodes.CONFLICT)) {
+      return false;
+    }
+
+    const latestLease: Lease = await this.retrieveLease();
+    return !!latestLease && this.heldBySameProcess(latestLease);
+  }
+
+  /**
+   * Determines whether an error or any nested cause contains the specified status code.
+   *
+   * @param error - the error to inspect.
+   * @param statusCode - the status code to match.
+   * @returns true if the status code is found in the error chain; otherwise, false.
+   */
+  private static hasStatusCode(error: unknown, statusCode: number): boolean {
+    if (!error || typeof error !== 'object') {
+      return false;
+    }
+
+    const typedError: {
+      statusCode?: number;
+      code?: number;
+      meta?: {
+        statusCode?: number;
+      };
+      cause?: unknown;
+    } = error;
+
+    return (
+      typedError.statusCode === statusCode ||
+      typedError.code === statusCode ||
+      typedError.meta?.statusCode === statusCode ||
+      IntervalLock.hasStatusCode(typedError.cause, statusCode)
+    );
   }
 
   /**
@@ -441,11 +505,11 @@ export class IntervalLock implements Lock {
    * @returns true if the lease has expired; otherwise, false.
    */
   private static checkExpiration(lease: Lease): boolean {
-    const now = Duration.ofMillis(Date.now());
-    const durationSec = lease.durationSeconds || DEFAULT_LEASE_DURATION;
-    const lastRenewalTime = lease.renewTime || lease.acquireTime;
-    const lastRenewal = Duration.ofMillis(new Date(lastRenewalTime).valueOf());
-    const deltaSec = now.minus(lastRenewal).seconds;
+    const now: Duration = Duration.ofMillis(Date.now());
+    const durationSec: number = lease.durationSeconds || DEFAULT_LEASE_DURATION;
+    const lastRenewalTime: Date = new Date(lease.renewTime || lease.acquireTime);
+    const lastRenewal: Duration = Duration.ofMillis(new Date(lastRenewalTime).valueOf());
+    const deltaSec: number = now.minus(lastRenewal).seconds;
     return deltaSec > durationSec;
   }
 

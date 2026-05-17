@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {type NamespaceName} from '../../types/namespace/namespace-name.js';
-import {type AnyObject} from '../../types/aliases.js';
+import {type AnyObject, type ArgvStruct} from '../../types/aliases.js';
 
 export interface OneShotVersionsObject {
   soloChart: string;
@@ -32,10 +32,13 @@ export interface OneShotSingleDeployConfigClass {
   deployMirrorNode: boolean;
   deployExplorer: boolean;
   deployRelay: boolean;
+  deployMetricsServer: boolean;
   force: boolean;
   quiet: boolean;
   rollback: boolean;
   parallelDeploy: boolean;
+  externalAddress: string;
   edgeEnabled: boolean;
   versions: OneShotVersionsObject;
+  argv: ArgvStruct;
 }
