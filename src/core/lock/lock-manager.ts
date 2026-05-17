@@ -98,7 +98,19 @@ export class LockManager {
     }
     const namespace: NamespaceName = deploymentNamespace || clusterSetupNamespace;
 
-    if (!(await this.k8Factory.default().namespaces().has(namespace))) {
+    let namespaceExists: boolean;
+    try {
+      namespaceExists = await this.k8Factory.default().namespaces().has(namespace);
+    } catch {
+      // If we cannot list namespaces (e.g. in-cluster SA lacks cluster-scope list permission),
+      // assume the namespace exists since it was explicitly provided via config.
+      this._logger.warn(
+        `Unable to verify namespace '${namespace}' existence (insufficient permissions), assuming it exists`,
+      );
+      return namespace;
+    }
+
+    if (!namespaceExists) {
       await this.k8Factory.default().namespaces().create(namespace);
 
       if (!(await this.k8Factory.default().namespaces().has(namespace))) {
