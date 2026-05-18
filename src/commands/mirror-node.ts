@@ -919,8 +919,25 @@ export class MirrorNodeCommand extends BaseCommand {
           false,
         );
       },
-      skip: ({config}: MirrorNodeDeployContext): boolean =>
-        config.useExternalDatabase || !config.installSharedResources,
+      skip: async (context_): Promise<boolean> => {
+        if (context_.config.useExternalDatabase) return true;
+        // When recovering from an interrupted deploy, shared resources may be
+        // installed but the mirror-passwords secret could still be missing
+        // (the mirror chart prime never completed).  Only skip prime if:
+        //   1. Shared resources don't need installing, AND
+        //   2. The mirror-passwords secret already exists
+        if (!context_.config.installSharedResources) {
+          const secretExists: boolean = await this.k8Factory
+            .getK8(context_.config.clusterContext)
+            .secrets()
+            .exists(context_.config.namespace, 'mirror-passwords')
+            .catch((): boolean => false);
+          if (secretExists) return true;
+          // Secret missing – prime needs to run despite installSharedResources=false
+          return false;
+        }
+        return false;
+      },
     };
   }
 

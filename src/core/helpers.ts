@@ -923,9 +923,10 @@ export async function createAndCopyBlockNodeJsonFileForConsensusNode(
       [constants.APPLICATION_PROPERTIES]: lines.join('\n'),
     };
 
+    const sharedHelmLabels: Record<string, string> = {'app.kubernetes.io/managed-by': 'Helm'};
     await ((await k8.configMaps().exists(namespace, sharedConfigMapName))
-      ? k8.configMaps().update(namespace, sharedConfigMapName, sharedConfigMapData)
-      : k8.configMaps().create(namespace, sharedConfigMapName, {}, sharedConfigMapData));
+      ? k8.configMaps().replace(namespace, sharedConfigMapName, sharedHelmLabels, sharedConfigMapData)
+      : k8.configMaps().create(namespace, sharedConfigMapName, sharedHelmLabels, sharedConfigMapData));
 
     const updatedApplicationPropertiesFilePath: string = PathEx.join(
       constants.SOLO_CACHE_DIR,
@@ -939,11 +940,22 @@ export async function createAndCopyBlockNodeJsonFileForConsensusNode(
   // Always write the block-nodes ConfigMap so the Helm chart can mount it
   // even when the pod hasn't been created yet (e.g. early recovery).
   const configName: string = `network-${nodeAlias}-data-config-cm`;
-  const configMapExists: boolean = await k8.configMaps().exists(namespace, configName);
+  const helmLabels: Record<string, string> = {'app.kubernetes.io/managed-by': 'Helm'};
 
-  await (configMapExists
-    ? k8.configMaps().update(namespace, configName, {'block-nodes.json': blockNodesJsonData})
-    : k8.configMaps().create(namespace, configName, {}, {'block-nodes.json': blockNodesJsonData}));
+  if (await k8.configMaps().exists(namespace, configName)) {
+    await k8.configMaps().replace(namespace, configName, helmLabels, {'block-nodes.json': blockNodesJsonData});
+  } else {
+    await k8.configMaps().create(namespace, configName, helmLabels, {'block-nodes.json': blockNodesJsonData});
+  }
+
+  // Add Helm ownership annotations so that `helm upgrade --install solo-deployment`
+  // can adopt this ConfigMap instead of failing with "cannot be imported".
+  try {
+    const annotateCmd: string = `kubectl --context "${context}" -n "${namespace.name}" annotate configmap "${configName}" --overwrite "meta.helm.sh/release-name=solo-deployment" "meta.helm.sh/release-namespace=${namespace.name}"`;
+    execSync(annotateCmd, {stdio: 'ignore', timeout: 10000});
+  } catch {
+    logger.warn(`Failed to annotate ConfigMap '${configName}' with Helm ownership; helm upgrade may fail.`);
+  }
 
   logger.debug(`Copied block-nodes configuration to consensus node ${consensusNode.name}`);
 }
