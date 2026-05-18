@@ -1414,14 +1414,15 @@ export class NetworkCommand extends BaseCommand {
               // them fresh with proper Helm ownership metadata instead of failing with
               // "exists and cannot be imported into the current release".
               const k8: K8 = this.k8Factory.getK8(clusterRefs.get(clusterReference));
-              const existingNodeConfigCMs: ConfigMap[] = await k8
+              const allCMs: ConfigMap[] = await k8
                 .configMaps()
-                .list(namespace, ['solo.hedera.com/type=network-node-data-config-cm'])
+                .list(namespace, [])
                 .catch((): ConfigMap[] => []);
-              for (const cm of existingNodeConfigCMs) {
+              for (const cm of allCMs) {
                 if (
-                  cm.labels?.['app.kubernetes.io/managed-by'] !== 'Helm' &&
-                  !cm.labels?.['meta.helm.sh/release-name']
+                  cm.name.includes('-data-config-cm') &&
+                  (cm.labels?.['app.kubernetes.io/managed-by'] !== 'Helm' ||
+                   !cm.labels?.['meta.helm.sh/release-name'])
                 ) {
                   this.logger.info(
                     `Deleting non-Helm-owned ConfigMap '${cm.name}' before solo-deployment chart upgrade`,

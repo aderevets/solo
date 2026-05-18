@@ -226,7 +226,7 @@ export class PostgresSharedResource {
           `  echo "Partial initialization detected: database '${databaseName}' exists but no sentinel. Cleaning up for fresh initialization."`,
           `  psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${databaseName}' AND pid <> pg_backend_pid();" 2>/dev/null || true`,
           `  psql -c "DROP DATABASE IF EXISTS ${databaseName};"`,
-          `  for role in mirror_graphql mirror_grpc mirror_importer mirror_api mirror_rest_java mirror_rosetta mirror_web3 ${ownerUsername}; do`,
+          `  for role in mirror_graphql mirror_grpc mirror_importer mirror_api mirror_rest mirror_rest_java mirror_rosetta mirror_web3 ${ownerUsername}; do`,
           '    psql -c "DROP USER IF EXISTS ${role};" 2>/dev/null || true',
           '  done',
           '  psql -c "DROP ROLE IF EXISTS temporary_admin, readwrite, readonly;" 2>/dev/null || true',

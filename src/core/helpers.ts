@@ -836,94 +836,108 @@ export async function createAndCopyBlockNodeJsonFileForConsensusNode(
 
   // In one-shot recovery, the consensus node pod may be in "Failed" phase if the
   // first deploy was interrupted (SIGKILL) while the node was starting up.
-  // Try to exec into the pod; if it fails because the pod is in a completed
-  // (Failed) state, delete the pod so the StatefulSet recreates it.
+  // Try to exec into the pod; if it fails because the pod is in a terminal
+  // state (Failed/NotFound), wait for the StatefulSet to recreate it.
   const k8Helper: K8Helper = new K8Helper(context);
-  let container: Container = await k8Helper.getConsensusNodeRootContainer(namespace, nodeAlias);
+  let container: Container | null = null;
   try {
-    await container.execContainer('pwd');
-  } catch (execError) {
-    const execMessage: string = execError instanceof Error ? execError.message : String(execError);
-    if (
-      execMessage.includes('cannot exec into a container in a completed pod') ||
-      execMessage.includes('pods') && execMessage.includes('not found')
-    ) {
-      logger.warn(
-        `Consensus node pod is in a terminal state (Failed or NotFound) – likely from interrupted deploy. ` +
-          'Waiting for StatefulSet to provide a running pod.',
-      );
-      // Delete the pod if it still exists, to force the StatefulSet to recreate it.
-      try {
-        const pod: Pod = await k8Helper.getConsensusNodePod(namespace, nodeAlias);
-        if (pod.podReference) {
-          await k8.pods().delete(pod.podReference);
-        }
-      } catch {
-        // Pod already gone – the StatefulSet will recreate it automatically.
-      }
-      // Wait for the recreated pod to be running (up to 3 minutes).
-      await k8
-        .pods()
-        .waitForRunningPhase(
-          namespace,
-          Templates.renderNodeLabelsFromNodeAlias(nodeAlias),
-          180,
-          5000,
+    container = await k8Helper.getConsensusNodeRootContainer(namespace, nodeAlias);
+  } catch {
+    // No pod exists yet – the StatefulSet will create one when the chart installs.
+    logger.warn('Consensus node pod not found; will write block-nodes config via ConfigMap.');
+  }
+
+  if (container) {
+    try {
+      await container.execContainer('pwd');
+    } catch (execError) {
+      const execMessage: string = execError instanceof Error ? execError.message : String(execError);
+      if (
+        execMessage.includes('cannot exec into a container in a completed pod') ||
+        execMessage.includes('pods') && execMessage.includes('not found')
+      ) {
+        logger.warn(
+          `Consensus node pod is in a terminal state (Failed or NotFound) – likely from interrupted deploy. ` +
+            'Waiting for StatefulSet to provide a running pod.',
         );
-      logger.info('Consensus node pod recreated and running.');
-      container = await k8Helper.getConsensusNodeRootContainer(namespace, nodeAlias);
-    } else {
-      throw execError;
+        try {
+          const existingPods: Pod[] = await k8
+            .pods()
+            .list(namespace, Templates.renderNodeLabelsFromNodeAlias(nodeAlias));
+          if (existingPods[0]?.podReference) {
+            await k8.pods().delete(existingPods[0].podReference);
+          }
+        } catch {
+          // Pod already gone – StatefulSet recreates automatically.
+        }
+        await k8
+          .pods()
+          .waitForRunningPhase(namespace, Templates.renderNodeLabelsFromNodeAlias(nodeAlias), 180, 5000);
+        logger.info('Consensus node pod recreated and running.');
+        container = await k8Helper.getConsensusNodeRootContainer(namespace, nodeAlias);
+      } else {
+        throw execError;
+      }
     }
   }
 
-  await container.execContainer('pwd');
+  if (container) {
+    await container.execContainer('pwd');
 
-  const targetDirectory: string = `${constants.HEDERA_HAPI_PATH}/data/config`;
+    const targetDirectory: string = `${constants.HEDERA_HAPI_PATH}/data/config`;
 
-  await container.execContainer(`mkdir -p ${targetDirectory}`);
+    await container.execContainer(`mkdir -p ${targetDirectory}`);
 
-  // Copy the file and rename it to block-nodes.json in the destination
-  await container.copyTo(blockNodesJsonPath, targetDirectory);
+    // Copy the file and rename it to block-nodes.json in the destination
+    await container.copyTo(blockNodesJsonPath, targetDirectory);
 
-  // If using node-specific files, rename the copied file to the standard name
-  const sourceFilename: string = path.basename(blockNodesJsonPath);
-  await container.execContainer(
-    `mv ${targetDirectory}/${sourceFilename} ${targetDirectory}/${constants.BLOCK_NODES_JSON_FILE}`,
-  );
+    // If using node-specific files, rename the copied file to the standard name
+    const sourceFilename: string = path.basename(blockNodesJsonPath);
+    await container.execContainer(
+      `mv ${targetDirectory}/${sourceFilename} ${targetDirectory}/${constants.BLOCK_NODES_JSON_FILE}`,
+    );
 
-  const applicationPropertiesFilePath: string = `${constants.HEDERA_HAPI_PATH}/data/config/${constants.APPLICATION_PROPERTIES}`;
+    const applicationPropertiesFilePath: string = `${constants.HEDERA_HAPI_PATH}/data/config/${constants.APPLICATION_PROPERTIES}`;
 
-  const applicationPropertiesData: string = await container.execContainer(`cat ${applicationPropertiesFilePath}`);
+    const applicationPropertiesData: string = await container.execContainer(`cat ${applicationPropertiesFilePath}`);
 
-  const lines: string[] = applicationPropertiesData.split('\n');
+    const lines: string[] = applicationPropertiesData.split('\n');
 
-  // Remove line to enable overriding below.
-  for (const line of lines) {
-    if (line === 'blockStream.streamMode=RECORDS') {
-      lines.splice(lines.indexOf(line), 1);
+    // Remove line to enable overriding below.
+    for (const line of lines) {
+      if (line === 'blockStream.streamMode=RECORDS') {
+        lines.splice(lines.indexOf(line), 1);
+      }
     }
+
+    // Switch to block streaming.
+    if (!lines.some((line): boolean => line.startsWith('blockStream.streamMode='))) {
+      lines.push(`blockStream.streamMode=${constants.BLOCK_STREAM_STREAM_MODE}`);
+    }
+    if (!lines.some((line): boolean => line.startsWith('blockStream.writerMode='))) {
+      lines.push(`blockStream.writerMode=${constants.BLOCK_STREAM_WRITER_MODE}`);
+    }
+
+    const sharedConfigMapName: string = constants.NETWORK_NODE_SHARED_DATA_CONFIG_MAP_NAME;
+    const sharedConfigMapData: Record<string, string> = {
+      [constants.APPLICATION_PROPERTIES]: lines.join('\n'),
+    };
+
+    await ((await k8.configMaps().exists(namespace, sharedConfigMapName))
+      ? k8.configMaps().update(namespace, sharedConfigMapName, sharedConfigMapData)
+      : k8.configMaps().create(namespace, sharedConfigMapName, {}, sharedConfigMapData));
+
+    const updatedApplicationPropertiesFilePath: string = PathEx.join(
+      constants.SOLO_CACHE_DIR,
+      constants.APPLICATION_PROPERTIES,
+    );
+
+    fs.writeFileSync(updatedApplicationPropertiesFilePath, lines.join('\n'));
+    await container.copyTo(updatedApplicationPropertiesFilePath, targetDirectory);
   }
 
-  // Switch to block streaming.
-
-  if (!lines.some((line): boolean => line.startsWith('blockStream.streamMode='))) {
-    lines.push(`blockStream.streamMode=${constants.BLOCK_STREAM_STREAM_MODE}`);
-  }
-
-  if (!lines.some((line): boolean => line.startsWith('blockStream.writerMode='))) {
-    lines.push(`blockStream.writerMode=${constants.BLOCK_STREAM_WRITER_MODE}`);
-  }
-
-  const sharedConfigMapName: string = constants.NETWORK_NODE_SHARED_DATA_CONFIG_MAP_NAME;
-  const sharedConfigMapData: Record<string, string> = {
-    [constants.APPLICATION_PROPERTIES]: lines.join('\n'),
-  };
-
-  await ((await k8.configMaps().exists(namespace, sharedConfigMapName))
-    ? k8.configMaps().update(namespace, sharedConfigMapName, sharedConfigMapData)
-    : k8.configMaps().create(namespace, sharedConfigMapName, {}, sharedConfigMapData));
-
+  // Always write the block-nodes ConfigMap so the Helm chart can mount it
+  // even when the pod hasn't been created yet (e.g. early recovery).
   const configName: string = `network-${nodeAlias}-data-config-cm`;
   const configMapExists: boolean = await k8.configMaps().exists(namespace, configName);
 
@@ -932,12 +946,4 @@ export async function createAndCopyBlockNodeJsonFileForConsensusNode(
     : k8.configMaps().create(namespace, configName, {}, {'block-nodes.json': blockNodesJsonData}));
 
   logger.debug(`Copied block-nodes configuration to consensus node ${consensusNode.name}`);
-
-  const updatedApplicationPropertiesFilePath: string = PathEx.join(
-    constants.SOLO_CACHE_DIR,
-    constants.APPLICATION_PROPERTIES,
-  );
-
-  fs.writeFileSync(updatedApplicationPropertiesFilePath, lines.join('\n'));
-  await container.copyTo(updatedApplicationPropertiesFilePath, targetDirectory);
 }
