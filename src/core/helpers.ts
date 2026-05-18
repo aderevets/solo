@@ -874,10 +874,10 @@ export async function createAndCopyBlockNodeJsonFileForConsensusNode(
     lines.push(`blockStream.writerMode=${constants.BLOCK_STREAM_WRITER_MODE}`);
   }
 
-  // Use createOrReplace so this works whether the ConfigMap already exists
-  // (normal path) or was just recreated by a fresh helm install (recovery path).
-  const sharedLabels: Record<string, string> = {'app.kubernetes.io/managed-by': 'Helm'};
-  await k8.configMaps().createOrReplace(namespace, 'network-node-data-config-cm', sharedLabels, {
+  // Update the shared ConfigMap with application.properties changes.
+  // This ConfigMap is owned by the separate Helm-managed shared-resources
+  // chart, so never add/modify Helm labels/annotations here.
+  await k8.configMaps().update(namespace, 'network-node-data-config-cm', {
     [constants.APPLICATION_PROPERTIES]: lines.join('\n'),
   });
 
