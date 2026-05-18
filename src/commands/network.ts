@@ -54,6 +54,7 @@ import {inject, injectable} from 'tsyringe-neo';
 import {InjectTokens} from '../core/dependency-injection/inject-tokens.js';
 import {patchInject} from '../core/dependency-injection/container-helper.js';
 import {type CommandFlag, type CommandFlags} from '../types/flag-types.js';
+import {type ConfigMap} from '../integration/kube/resources/config-map/config-map.js';
 import {type K8} from '../integration/kube/k8.js';
 import {type Lock} from '../core/lock/lock.js';
 import {type LoadBalancerIngress} from '../integration/kube/resources/load-balancer-ingress.js';
@@ -1405,6 +1406,28 @@ export class NetworkCommand extends BaseCommand {
                   clusterRefs.get(clusterReference),
                 );
                 config.isUpgrade = true;
+              }
+
+              // During one-shot recovery, createAndCopyBlockNodeJsonFileForConsensusNode()
+              // may have created ConfigMaps (network-node*-data-config-cm) that lack Helm
+              // ownership labels.  Delete them so `helm upgrade --install` can create
+              // them fresh with proper Helm ownership metadata instead of failing with
+              // "exists and cannot be imported into the current release".
+              const k8: K8 = this.k8Factory.getK8(clusterRefs.get(clusterReference));
+              const existingNodeConfigCMs: ConfigMap[] = await k8
+                .configMaps()
+                .list(namespace, ['solo.hedera.com/type=network-node-data-config-cm'])
+                .catch((): ConfigMap[] => []);
+              for (const cm of existingNodeConfigCMs) {
+                if (
+                  cm.labels?.['app.kubernetes.io/managed-by'] !== 'Helm' &&
+                  !cm.labels?.['meta.helm.sh/release-name']
+                ) {
+                  this.logger.info(
+                    `Deleting non-Helm-owned ConfigMap '${cm.name}' before solo-deployment chart upgrade`,
+                  );
+                  await k8.configMaps().delete(namespace, cm.name);
+                }
               }
 
               config.soloChartVersion = SemanticVersion.getValidSemanticVersion(

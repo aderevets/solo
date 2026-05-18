@@ -170,13 +170,20 @@ export class PlatformInstaller {
 
       return true;
     } catch (error) {
-      const logFile: string = `${constants.HEDERA_HAPI_PATH}/output/extract-platform.log`;
-      const response: string = await this.k8Factory
-        .getK8(context)
-        .containers()
-        .readByRef(ContainerReference.of(podReference, constants.ROOT_CONTAINER))
-        .execContainer(['bash', '-c', `cat ${logFile} || echo "Log file not found or empty"`]);
-      this.logger.showUser(`Log file content from ${logFile}:\n${response}`);
+      // Try to read the platform extraction log to provide a meaningful error.
+      // If the pod is gone (e.g. recreated by StatefulSet during recovery), the
+      // log read may fail – that's fine, the original error is the real problem.
+      try {
+        const logFile: string = `${constants.HEDERA_HAPI_PATH}/output/extract-platform.log`;
+        const response: string = await this.k8Factory
+          .getK8(context)
+          .containers()
+          .readByRef(ContainerReference.of(podReference, constants.ROOT_CONTAINER))
+          .execContainer(['bash', '-c', `cat ${logFile} || echo "Log file not found or empty"`]);
+        this.logger.showUser(`Log file content from ${logFile}:\n${response}`);
+      } catch {
+        this.logger.warn('Unable to read platform extraction log (pod may have been recreated).');
+      }
 
       const message: string = `failed to extract platform code in this pod '${podReference}' while using the '${context}' context: ${error.message}`;
       throw new SoloError(message, error);
