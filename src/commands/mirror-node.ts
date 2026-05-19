@@ -33,6 +33,8 @@ import * as versions from '../../version.js';
 import {INGRESS_CONTROLLER_VERSION} from '../../version.js';
 import {type NamespaceName} from '../types/namespace/namespace-name.js';
 import {PodReference} from '../integration/kube/resources/pod/pod-reference.js';
+import {PodName} from '../integration/kube/resources/pod/pod-name.js';
+import {ContainerReference} from '../integration/kube/resources/container/container-reference.js';
 import {Pod} from '../integration/kube/resources/pod/pod.js';
 import {type Pods} from '../integration/kube/resources/pod/pods.js';
 import chalk from 'chalk';
@@ -835,7 +837,8 @@ export class MirrorNodeCommand extends BaseCommand {
           MirrorNodeCommand.MIRROR_ENVIRONMENT_VARIABLE_PREFIX,
         );
       },
-      skip: ({config}: MirrorNodeDeployContext | MirrorNodeUpgradeContext): boolean => config.useExternalDatabase,
+      skip: ({config}: MirrorNodeDeployContext): boolean =>
+        config.useExternalDatabase || !config.installSharedResources,
     };
   }
 
@@ -919,24 +922,66 @@ export class MirrorNodeCommand extends BaseCommand {
           false,
         );
       },
-      skip: async (context_): Promise<boolean> => {
-        if (context_.config.useExternalDatabase) return true;
-        // When recovering from an interrupted deploy, shared resources may be
-        // installed but the mirror-passwords secret could still be missing
-        // (the mirror chart prime never completed).  Only skip prime if:
-        //   1. Shared resources don't need installing, AND
-        //   2. The mirror-passwords secret already exists
-        if (!context_.config.installSharedResources) {
-          const secretExists: boolean = await this.k8Factory
-            .getK8(context_.config.clusterContext)
-            .secrets()
-            .exists(context_.config.namespace, 'mirror-passwords')
-            .catch((): boolean => false);
-          if (secretExists) return true;
-          // Secret missing – prime needs to run despite installSharedResources=false
-          return false;
+      skip: ({config}: MirrorNodeDeployContext): boolean =>
+        config.useExternalDatabase || !config.installSharedResources,
+    };
+  }
+
+  /**
+   * After the mirror chart is installed (which may regenerate the
+   * `mirror-passwords` secret with fresh random values), update the
+   * PostgreSQL role passwords to match.  This prevents "password
+   * authentication failed" errors when the REST / importer / etc.
+   * pods try to connect to a DB whose role passwords were set by
+   * the init script using the old secret values.
+   */
+  private syncMirrorPasswordsTask(): SoloListrTask<AnyListrContext> {
+    return {
+      title: 'Sync mirror passwords with DB',
+      task: async (context_): Promise<void> => {
+        const {namespace, clusterContext} = context_.config;
+        const prefix: string = MirrorNodeCommand.MIRROR_ENVIRONMENT_VARIABLE_PREFIX;
+
+        const mirrorPasswordsSecret: Secret = await this.k8Factory
+          .getK8(clusterContext)
+          .secrets()
+          .read(namespace, 'mirror-passwords');
+
+        const rolePasswordMappings: Array<{role: string; secretKey: string}> = [
+          {role: 'mirror_importer', secretKey: `${prefix}_MIRROR_IMPORTER_DB_PASSWORD`},
+          {role: 'mirror_grpc', secretKey: `${prefix}_MIRROR_GRPC_DB_PASSWORD`},
+          {role: 'mirror_rest', secretKey: `${prefix}_MIRROR_REST_DB_PASSWORD`},
+          {role: 'mirror_rest_java', secretKey: `${prefix}_MIRROR_RESTJAVA_DB_PASSWORD`},
+          {role: 'mirror_rosetta', secretKey: `${prefix}_MIRROR_ROSETTA_DB_PASSWORD`},
+          {role: 'mirror_web3', secretKey: `${prefix}_MIRROR_WEB3_DB_PASSWORD`},
+          {role: 'mirror_graphql', secretKey: `${prefix}_MIRROR_GRAPHQL_DB_PASSWORD`},
+          {role: 'mirror_api', secretKey: `${prefix}_MIRROR_REST_DB_PASSWORD`},
+        ];
+
+        for (const {role, secretKey} of rolePasswordMappings) {
+          const rawPassword: string | undefined = mirrorPasswordsSecret.data[secretKey];
+          if (!rawPassword) continue;
+
+          const password: string = Base64.decode(rawPassword) || rawPassword;
+          if (!password) continue;
+
+          const alterSql: string = `ALTER USER "${role}" WITH PASSWORD '${password.replace(/'/g, "''")}'`;
+
+          try {
+            await this.k8Factory
+              .getK8(clusterContext)
+              .containers()
+              .readByRef(
+                ContainerReference.of(
+                  PodReference.of(namespace, PodName.of('solo-shared-resources-postgres-0')),
+                  constants.ROOT_CONTAINER,
+                ),
+              )
+              .execContainer(['bash', '-c', `psql -c "${alterSql}"`]);
+          } catch {
+            // Role may not exist yet — skip.
+          }
         }
-        return false;
       },
     };
   }
@@ -1350,6 +1395,7 @@ export class MirrorNodeCommand extends BaseCommand {
               this.deleteStaleRedisSecretTask(), // remove stale sentinel nodes left by a prior prime install
               this.initializeSharedPostgresDatabaseTask(), // must run before mirror chart so importer doesn't hold a session during DB creation
               this.enableMirrorNodeTask(MirrorNodeCommandType.ADD),
+              this.syncMirrorPasswordsTask(), // sync passwords after chart may have regenerated the secret
             ];
 
             return parentTask.newListr(subTasks, {

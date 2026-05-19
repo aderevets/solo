@@ -150,11 +150,11 @@ export class PlatformInstaller {
 
     try {
       // Upload zip and checksum to the container — extract-platform.sh expects them in HEDERA_USER_HOME_DIR
-      await this.copyFiles(podReference, [zipPath, checksumPath], constants.HEDERA_USER_HOME_DIR, undefined, context);
+      await this.retryCopyFiles(podReference, [zipPath, checksumPath], constants.HEDERA_USER_HOME_DIR, context);
 
       const scriptName: string = 'extract-platform.sh';
       const sourcePath: string = PathEx.joinWithRealPath(constants.RESOURCES_DIR, scriptName);
-      await this.copyFiles(podReference, [sourcePath], constants.HEDERA_USER_HOME_DIR, undefined, context);
+      await this.retryCopyFiles(podReference, [sourcePath], constants.HEDERA_USER_HOME_DIR, context);
 
       const extractScript: string = `${constants.HEDERA_USER_HOME_DIR}/${scriptName}`; // inside the container
       const containerReference: ContainerReference = ContainerReference.of(podReference, constants.ROOT_CONTAINER);
@@ -163,7 +163,19 @@ export class PlatformInstaller {
 
       const container: Container = k8Containers.readByRef(containerReference);
 
-      await container.execContainer('sync'); // ensure all writes are flushed before executing the script
+      try {
+        await container.execContainer('sync'); // ensure all writes are flushed before executing the script
+      } catch (execError: any) {
+        if (execError?.message?.includes?.('cannot exec into a container in a completed pod') ||
+            execError?.message?.includes?.('pods.*not found')) {
+          this.logger.warn(
+            'Consensus node pod is in a terminal phase (Failed/NotFound); ' +
+            'fetch-platform skipped. The start command will retry.',
+          );
+          return false;
+        }
+        throw execError;
+      }
 
       // Verify the zip file was uploaded successfully — during recovery the pod
       // may have been recreated between the copy and this exec, losing the file.
@@ -262,6 +274,47 @@ export class PlatformInstaller {
         error,
       );
     }
+  }
+
+  /**
+   * Copy files to a pod with automatic re-resolution of the pod reference
+   * when the pod is recreated (e.g. by a StatefulSet rolling update during
+   * one-shot recovery).
+   */
+  private async retryCopyFiles(
+    podReference: PodReference,
+    sourceFiles: string[],
+    destinationDirectory: string,
+    context?: string,
+    maxRetries: number = 3,
+  ): Promise<string[]> {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        return await this.copyFiles(podReference, sourceFiles, destinationDirectory, undefined, context);
+      } catch (error: any) {
+        const isNotFound: boolean = error?.message?.includes?.('not found') ?? false;
+        if (!isNotFound || attempt >= maxRetries) {
+          throw error;
+        }
+        this.logger.warn(
+          `Pod '${podReference.name}' not found during file copy (attempt ${attempt}/${maxRetries}); ` +
+            'waiting for StatefulSet to recreate it…',
+        );
+        // StatefulSet recreates the pod with the same name — wait for it.
+        try {
+          await this.k8Factory
+            .getK8(context)
+            .pods()
+            .waitForPodByReference(podReference, 60, 2000);
+          this.logger.info(`Pod '${podReference.name}' recreated; retrying copy.`);
+        } catch {
+          this.logger.warn(`Pod '${podReference.name}' did not reappear; giving up.`);
+          throw error;
+        }
+      }
+    }
+    // Unreachable
+    throw new SoloError('retryCopyFiles failed unexpectedly');
   }
 
   public async copyGossipKeys(
