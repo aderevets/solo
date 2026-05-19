@@ -900,7 +900,12 @@ export class DeploymentCommand extends BaseCommand {
     return {
       title: 'Check for other deployments',
       task: async (): Promise<void> => {
-        await this.showExistingDeploymentsInCluster();
+        try {
+          await this.showExistingDeploymentsInCluster();
+        } catch {
+          // Cluster may be unreachable (e.g. recovery after early interrupt).
+          // Not a hard error — the deploy can proceed.
+        }
       },
     };
   }
