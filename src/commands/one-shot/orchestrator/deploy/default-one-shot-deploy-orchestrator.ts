@@ -202,12 +202,20 @@ export class DefaultOneShotDeployOrchestrator implements OneShotDeployOrchestrat
               }
             }
             config.clusterRef ||= 'one-shot';
-            config.context ||= this.k8Factory.default().contexts().readCurrent();
             config.deployment ||= 'one-shot';
             config.namespace ||= NamespaceName.of('one-shot');
             this.configManager.setFlag(flags.namespace, config.namespace);
             config.numberOfConsensusNodes ||= 1;
             config.force = argv.force as boolean;
+
+            await this.localConfig.load();
+
+            const userProvidedContext: boolean = typeof argv.context === 'string' && argv.context.length > 0;
+            if (userProvidedContext) {
+              config.context ||= this.k8Factory.default().contexts().readCurrent();
+            } else {
+              config.context = await this.resolvePreferredOneShotContext(config.clusterRef, config.context);
+            }
 
             // Ensure release tag is set in network configuration so subcommands use the correct version
             const releaseTagKey: string = flags.getFormattedFlagKey(flags.releaseTag);
@@ -227,8 +235,6 @@ export class DefaultOneShotDeployOrchestrator implements OneShotDeployOrchestrat
               deployment: config.deployment,
               namespace: config.namespace.name,
             });
-
-            await this.localConfig.load();
 
             const existingDeployment: Deployment | undefined = this.localConfig.configuration.deployments.find(
               (localDeployment): boolean => localDeployment.name === config.deployment,
@@ -255,6 +261,13 @@ export class DefaultOneShotDeployOrchestrator implements OneShotDeployOrchestrat
               const hasClusterReferenceAttached: boolean = existingDeployment.clusters.some(
                 (clusterReference): boolean => clusterReference.toString() === config.clusterRef,
               );
+
+              const mappedContext: string | undefined = this.localConfig.configuration.clusterRefs
+                .get(config.clusterRef)
+                ?.toString();
+              if (mappedContext && !userProvidedContext) {
+                config.context = mappedContext;
+              }
 
               if (hasClusterReferenceAttached) {
                 const remoteConfigExists: boolean = await this.k8Factory
@@ -726,6 +739,58 @@ export class DefaultOneShotDeployOrchestrator implements OneShotDeployOrchestrat
       ),
       constants.LISTR_DEFAULT_OPTIONS.DEFAULT as ListrBaseClassOptions<OneShotSingleDeployContext>,
     );
+  }
+
+  private async resolvePreferredOneShotContext(clusterReference: string, configuredContext?: string): Promise<string> {
+    const contextsApi = this.k8Factory.default().contexts();
+    const availableContexts: string[] = contextsApi.list();
+    const preferredKindContext: string = `kind-${constants.DEFAULT_CLUSTER}`;
+    const mappedContext: string | undefined = this.localConfig.configuration.clusterRefs
+      .get(clusterReference)
+      ?.toString();
+
+    const kindCandidates: string[] = [];
+    if (availableContexts.includes(preferredKindContext)) {
+      kindCandidates.push(preferredKindContext);
+    }
+    kindCandidates.push(
+      ...availableContexts.filter(
+        (context: string): boolean => context.startsWith('kind-') && context !== preferredKindContext,
+      ),
+    );
+
+    for (const candidate of kindCandidates) {
+      if (await this.isContextReachable(candidate)) {
+        return candidate;
+      }
+    }
+
+    if (mappedContext && (await this.isContextReachable(mappedContext))) {
+      return mappedContext;
+    }
+
+    if (configuredContext && (await this.isContextReachable(configuredContext))) {
+      return configuredContext;
+    }
+
+    const currentContext: string = contextsApi.readCurrent();
+    if (currentContext && (await this.isContextReachable(currentContext))) {
+      return currentContext;
+    }
+
+    return configuredContext || mappedContext || currentContext;
+  }
+
+  private async isContextReachable(context: string | undefined): Promise<boolean> {
+    if (!context) {
+      return false;
+    }
+
+    try {
+      return await this.k8Factory.default().contexts().testContextConnection(context);
+    } catch {
+      return false;
+    }
   }
 
   private buildCreateAccountsTask(config: OneShotSingleDeployConfigClass): SoloListrTask<OneShotSingleDeployContext> {

@@ -871,20 +871,96 @@ export class DeploymentCommand extends BaseCommand {
 
         try {
           await this.k8Factory.getK8(context).namespaces().list();
-        } catch (error: any) {
+        } catch (error: unknown) {
           // 403 (FORBIDDEN) means we connected but lack namespace-list RBAC —
           // that's fine, the connection itself is valid.
-          if (
-            error?.statusCode === StatusCodes.FORBIDDEN ||
-            error?.meta?.statusCode === StatusCodes.FORBIDDEN ||
-            error?.code === StatusCodes.FORBIDDEN
-          ) {
+          if (DeploymentCommand.hasStatusCode(error, StatusCodes.FORBIDDEN)) {
             return;
           }
+
+          const fallbackContext: Context | undefined = await this.findReachableFallbackContext(context);
+          if (fallbackContext) {
+            this.logger.warn(
+              `Connection test failed for context '${context}'. ` +
+                `Switching cluster-ref '${clusterRef}' to reachable context '${fallbackContext}'.`,
+            );
+
+            context_.config.context = fallbackContext;
+            this.localConfig.configuration.clusterRefs.set(clusterRef, new StringFacade(fallbackContext));
+            await this.localConfig.persist();
+
+            task.title += ` -> fallback context: ${fallbackContext}`;
+
+            try {
+              await this.k8Factory.getK8(fallbackContext).namespaces().list();
+            } catch (fallbackError: unknown) {
+              if (DeploymentCommand.hasStatusCode(fallbackError, StatusCodes.FORBIDDEN)) {
+                return;
+              }
+              throw new SoloError(`Connection failed for cluster ${clusterRef} with context: ${fallbackContext}`);
+            }
+
+            return;
+          }
+
           throw new SoloError(`Connection failed for cluster ${clusterRef} with context: ${context}`);
         }
       },
     };
+  }
+
+  private static hasStatusCode(error: unknown, statusCode: number): boolean {
+    if (!error || typeof error !== 'object') {
+      return false;
+    }
+
+    const typedError: {
+      statusCode?: number;
+      code?: number;
+      meta?: {
+        statusCode?: number;
+      };
+      cause?: unknown;
+    } = error;
+
+    return (
+      typedError.statusCode === statusCode ||
+      typedError.code === statusCode ||
+      typedError.meta?.statusCode === statusCode ||
+      DeploymentCommand.hasStatusCode(typedError.cause, statusCode)
+    );
+  }
+
+  private async findReachableFallbackContext(failedContext: Context): Promise<Context | undefined> {
+    const contextsApi = this.k8Factory.default().contexts();
+    const allContexts: Context[] = contextsApi.list();
+
+    if (allContexts.length === 0) {
+      return undefined;
+    }
+
+    const preferredKindContext: Context = `kind-${constants.DEFAULT_CLUSTER}`;
+    const kindContexts: Context[] = allContexts.filter(
+      (context: Context): boolean => context.startsWith('kind-') && context !== failedContext,
+    );
+
+    const candidates: Context[] = [];
+    if (kindContexts.includes(preferredKindContext)) {
+      candidates.push(preferredKindContext);
+    }
+    candidates.push(...kindContexts.filter((context: Context): boolean => context !== preferredKindContext));
+
+    for (const candidate of candidates) {
+      try {
+        if (await contextsApi.testContextConnection(candidate)) {
+          return candidate;
+        }
+      } catch {
+        // Ignore and continue testing other contexts.
+      }
+    }
+
+    return undefined;
   }
 
   public verifyClusterAddPrerequisites(): SoloListrTask<DeploymentAddClusterContext> {

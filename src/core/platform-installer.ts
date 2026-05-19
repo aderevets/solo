@@ -195,26 +195,51 @@ export class PlatformInstaller {
         await this.copyFiles(podReference, [zipPath, checksumPath], constants.HEDERA_USER_HOME_DIR, undefined, context);
       }
 
-      await container.execContainer(`chmod +x ${extractScript}`);
-      await container.execContainer(`chown root:root ${extractScript}`);
-      await container.execContainer([extractScript, tag]);
+      const maxExtractAttempts: number = 3;
+      let extractLastError: unknown;
+      for (let attempt = 1; attempt <= maxExtractAttempts; attempt++) {
+        try {
+          await container.execContainer(`chmod +x ${extractScript}`);
+          await container.execContainer(`chown root:root ${extractScript}`);
+          await container.execContainer([extractScript, tag]);
+          extractLastError = undefined;
+          break;
+        } catch (extractError) {
+          extractLastError = extractError;
+          if (!this.isRetryableExtractionError(extractError) || attempt >= maxExtractAttempts) {
+            throw extractError;
+          }
+
+          this.logger.warn(
+            `Platform extraction failed (attempt ${attempt}/${maxExtractAttempts}) with a transient container error; retrying...`,
+          );
+
+          // Pod/container can restart during interrupted redeploy recovery.
+          // Re-copy artifacts and script, then retry extraction.
+          await this.retryCopyFiles(podReference, [zipPath, checksumPath], constants.HEDERA_USER_HOME_DIR, context);
+          await this.retryCopyFiles(podReference, [sourcePath], constants.HEDERA_USER_HOME_DIR, context);
+        }
+      }
+      if (extractLastError) {
+        throw extractLastError;
+      }
 
       // Verify that JARs were actually extracted — the start command will fail
       // if they're missing, so catch it early with a clearer diagnostic.
-      const appsDir: string = `${constants.HEDERA_HAPI_PATH}/${constants.HEDERA_DATA_APPS_DIR}`;
+      const appsDirectory: string = `${constants.HEDERA_HAPI_PATH}/${constants.HEDERA_DATA_APPS_DIR}`;
       const jarCountOutput: string = await container.execContainer([
         'bash',
         '-c',
-        `ls "${appsDir}"/*.jar 2>/dev/null | wc -l`,
+        `ls "${appsDirectory}"/*.jar 2>/dev/null | wc -l`,
       ]);
       const jarCount: number = Number.parseInt(jarCountOutput.trim(), 10);
       if (jarCount === 0) {
         this.logger.warn(
-          `No JAR files found after extraction in ${appsDir}. ` +
+          `No JAR files found after extraction in ${appsDirectory}. ` +
             'The platform zip may be missing or corrupt. The start command will fail.',
         );
       } else {
-        this.logger.info(`Platform extraction verified: ${jarCount} JAR file(s) in ${appsDir}`);
+        this.logger.info(`Platform extraction verified: ${jarCount} JAR file(s) in ${appsDirectory}`);
       }
 
       return true;
@@ -232,7 +257,9 @@ export class PlatformInstaller {
         this.logger.warn('Unable to read platform extraction log (pod may have been recreated).');
       }
       if (logContent) {
-        this.logger.showUser(`Log file content from ${constants.HEDERA_HAPI_PATH}/output/extract-platform.log:\n${logContent}`);
+        this.logger.showUser(
+          `Log file content from ${constants.HEDERA_HAPI_PATH}/output/extract-platform.log:\n${logContent}`,
+        );
       }
 
       const message: string = `failed to extract platform code in this pod '${podReference}' while using the '${context}' context: ${error.message}`;
@@ -324,6 +351,16 @@ export class PlatformInstaller {
     }
     // Unreachable
     throw new SoloError('retryCopyFiles failed unexpectedly');
+  }
+
+  private isRetryableExtractionError(error: unknown): boolean {
+    const message: string = error instanceof Error ? error.message : String(error ?? '');
+    return (
+      message.includes('failed with code 137') ||
+      message.includes('command terminated with exit code 137') ||
+      message.includes('cannot exec into a container in a completed pod') ||
+      (message.includes('pods') && message.includes('not found'))
+    );
   }
 
   public async copyGossipKeys(
