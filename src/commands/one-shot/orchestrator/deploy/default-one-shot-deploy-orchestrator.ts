@@ -382,10 +382,18 @@ export class DefaultOneShotDeployOrchestrator implements OneShotDeployOrchestrat
             _: OneShotSingleDeployContext,
             task: SoloListrTaskWrapper<OneShotSingleDeployContext>,
           ): Promise<void> => {
-            const existingRemoteConfigs: ConfigMap[] = await this.k8Factory
-              .default()
-              .configMaps()
-              .listForAllNamespaces(Templates.renderConfigMapRemoteConfigLabels());
+            let existingRemoteConfigs: ConfigMap[] = [];
+            try {
+              existingRemoteConfigs = await this.k8Factory
+                .default()
+                .configMaps()
+                .listForAllNamespaces(Templates.renderConfigMapRemoteConfigLabels());
+            } catch {
+              // Cluster may be unreachable (recovery after interrupt, or
+              // connectivity issue) — not a hard error.
+              this.logger.warn('Unable to check for existing deployments; cluster may be unavailable.');
+              return;
+            }
             if (existingRemoteConfigs.length > 0) {
               const existingDeploymentsTable: string[] = remoteConfigsToDeploymentsTable(existingRemoteConfigs);
               const promptOptions: {default: boolean; message: string} = {
