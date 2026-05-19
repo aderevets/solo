@@ -901,15 +901,20 @@ export async function createAndCopyBlockNodeJsonFileForConsensusNode(
       // ConfigMap may have been temporarily deleted by a concurrent helm
       // uninstall (recovery path).  Create it with Helm labels so the next
       // helm upgrade can adopt it.
-      await k8.configMaps().create(namespace, 'network-node-data-config-cm', {'app.kubernetes.io/managed-by': 'Helm'}, {
-        [constants.APPLICATION_PROPERTIES]: lines.join('\n'),
-      });
+      await k8.configMaps().create(
+        namespace,
+        'network-node-data-config-cm',
+        {'app.kubernetes.io/managed-by': 'Helm'},
+        {
+          [constants.APPLICATION_PROPERTIES]: lines.join('\n'),
+        },
+      );
       // Also add Helm annotations so the subsequent helm upgrade can adopt it.
       try {
         const annotateCmd: string =
           `kubectl --context "${context}" -n "${namespace.name}" annotate configmap "network-node-data-config-cm" --overwrite` +
           ` "meta.helm.sh/release-name=solo-deployment" "meta.helm.sh/release-namespace=${namespace.name}"`;
-        execSync(annotateCmd, {stdio: 'ignore', timeout: 10000});
+        execSync(annotateCmd, {stdio: 'ignore', timeout: 10_000});
       } catch {
         logger.warn('Failed to annotate shared ConfigMap with Helm ownership; helm upgrade may fail.');
       }
@@ -940,7 +945,7 @@ export async function createAndCopyBlockNodeJsonFileForConsensusNode(
     const annotateCmd: string =
       `kubectl --context "${context}" -n "${namespace.name}" annotate configmap "${configName}" --overwrite` +
       ` "meta.helm.sh/release-name=solo-deployment" "meta.helm.sh/release-namespace=${namespace.name}"`;
-    execSync(annotateCmd, {stdio: 'ignore', timeout: 10000});
+    execSync(annotateCmd, {stdio: 'ignore', timeout: 10_000});
   } catch {
     logger.warn(`Failed to annotate ConfigMap '${configName}' with Helm ownership; helm upgrade may fail.`);
   }

@@ -1421,8 +1421,7 @@ export class NetworkCommand extends BaseCommand {
               for (const cm of allCMs) {
                 if (
                   cm.name.includes('-data-config-cm') &&
-                  (cm.labels?.['app.kubernetes.io/managed-by'] !== 'Helm' ||
-                   !cm.labels?.['meta.helm.sh/release-name'])
+                  (cm.labels?.['app.kubernetes.io/managed-by'] !== 'Helm' || !cm.labels?.['meta.helm.sh/release-name'])
                 ) {
                   this.logger.info(
                     `Deleting non-Helm-owned ConfigMap '${cm.name}' before solo-deployment chart upgrade`,

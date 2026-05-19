@@ -960,12 +960,16 @@ export class MirrorNodeCommand extends BaseCommand {
 
         for (const {role, secretKey} of rolePasswordMappings) {
           const rawPassword: string | undefined = mirrorPasswordsSecret.data[secretKey];
-          if (!rawPassword) continue;
+          if (!rawPassword) {
+            continue;
+          }
 
           const password: string = Base64.decode(rawPassword) || rawPassword;
-          if (!password) continue;
+          if (!password) {
+            continue;
+          }
 
-          const alterSql: string = `ALTER USER "${role}" WITH PASSWORD '${password.replace(/'/g, "''")}'`;
+          const alterSql: string = `ALTER USER "${role}" WITH PASSWORD '${password.replaceAll("'", "''")}'`;
 
           try {
             await this.k8Factory

@@ -166,11 +166,13 @@ export class PlatformInstaller {
       try {
         await container.execContainer('sync'); // ensure all writes are flushed before executing the script
       } catch (execError: any) {
-        if (execError?.message?.includes?.('cannot exec into a container in a completed pod') ||
-            execError?.message?.includes?.('pods.*not found')) {
+        if (
+          execError?.message?.includes?.('cannot exec into a container in a completed pod') ||
+          execError?.message?.includes?.('pods.*not found')
+        ) {
           this.logger.warn(
             'Consensus node pod is in a terminal phase (Failed/NotFound); ' +
-            'fetch-platform skipped. The start command will retry.',
+              'fetch-platform skipped. The start command will retry.',
           );
           return false;
         }
@@ -187,7 +189,9 @@ export class PlatformInstaller {
         `test -f "${zipInContainer}" && echo "yes" || echo "no"`,
       ]);
       if (zipExistsOutput.trim() !== 'yes') {
-        this.logger.warn(`Zip file '${zipInContainer}' not found after upload; pod may have been recreated. Re-uploading...`);
+        this.logger.warn(
+          `Zip file '${zipInContainer}' not found after upload; pod may have been recreated. Re-uploading...`,
+        );
         await this.copyFiles(podReference, [zipPath, checksumPath], constants.HEDERA_USER_HOME_DIR, undefined, context);
       }
 
@@ -302,10 +306,7 @@ export class PlatformInstaller {
         );
         // StatefulSet recreates the pod with the same name — wait for it.
         try {
-          await this.k8Factory
-            .getK8(context)
-            .pods()
-            .waitForPodByReference(podReference, 60, 2000);
+          await this.k8Factory.getK8(context).pods().waitForPodByReference(podReference, 60, 2000);
           this.logger.info(`Pod '${podReference.name}' recreated; retrying copy.`);
         } catch {
           this.logger.warn(`Pod '${podReference.name}' did not reappear; giving up.`);

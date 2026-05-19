@@ -284,7 +284,7 @@ export class DefaultOneShotDeployOrchestrator implements OneShotDeployOrchestrat
               if (remoteConfigExists) {
                 this.logger.info(
                   `Remote config found for deployment '${config.deployment}' in namespace '${config.namespace.name}' ` +
-                    `(local config absent – likely from interrupted deploy). Reusing existing deployment state.`,
+                    '(local config absent – likely from interrupted deploy). Reusing existing deployment state.',
                 );
                 shouldCreateDeployment = false;
                 shouldAttachDeployment = false;
