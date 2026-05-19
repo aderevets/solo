@@ -875,11 +875,20 @@ export async function createAndCopyBlockNodeJsonFileForConsensusNode(
   }
 
   // Update the shared ConfigMap with application.properties changes.
-  // This ConfigMap is owned by the separate Helm-managed shared-resources
-  // chart, so never add/modify Helm labels/annotations here.
-  await k8.configMaps().update(namespace, 'network-node-data-config-cm', {
-    [constants.APPLICATION_PROPERTIES]: lines.join('\n'),
-  });
+  // This ConfigMap is owned by the Helm-managed solo-deployment chart template,
+  // so never add/modify Helm ownership metadata here.
+  try {
+    await k8.configMaps().update(namespace, 'network-node-data-config-cm', {
+      [constants.APPLICATION_PROPERTIES]: lines.join('\n'),
+    });
+  } catch {
+    // ConfigMap may have been temporarily deleted by a concurrent helm
+    // uninstall (recovery path).  Create it and let the next helm upgrade
+    // adopt it with proper ownership metadata.
+    await k8.configMaps().create(namespace, 'network-node-data-config-cm', {}, {
+      [constants.APPLICATION_PROPERTIES]: lines.join('\n'),
+    });
+  }
 
   const configName: string = `network-${nodeAlias}-data-config-cm`;
   const helmLabels: Record<string, string> = {'app.kubernetes.io/managed-by': 'Helm'};

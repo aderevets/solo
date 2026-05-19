@@ -168,6 +168,24 @@ export class PlatformInstaller {
       await container.execContainer(`chown root:root ${extractScript}`);
       await container.execContainer([extractScript, tag]);
 
+      // Verify that JARs were actually extracted — the start command will fail
+      // if they're missing, so catch it early with a clearer diagnostic.
+      const appsDir: string = `${constants.HEDERA_HAPI_PATH}/${constants.HEDERA_DATA_APPS_DIR}`;
+      const jarCountOutput: string = await container.execContainer([
+        'bash',
+        '-c',
+        `ls "${appsDir}"/*.jar 2>/dev/null | wc -l`,
+      ]);
+      const jarCount: number = Number.parseInt(jarCountOutput.trim(), 10);
+      if (jarCount === 0) {
+        this.logger.warn(
+          `No JAR files found after extraction in ${appsDir}. ` +
+            'The platform zip may be missing or corrupt. The start command will fail.',
+        );
+      } else {
+        this.logger.info(`Platform extraction verified: ${jarCount} JAR file(s) in ${appsDir}`);
+      }
+
       return true;
     } catch (error) {
       const logFile: string = `${constants.HEDERA_HAPI_PATH}/output/extract-platform.log`;

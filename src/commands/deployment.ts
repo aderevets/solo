@@ -50,6 +50,7 @@ import yaml from 'yaml';
 import {PathEx} from '../business/utils/path-ex.js';
 import fs from 'node:fs/promises';
 import {ResourceNotFoundError} from '../integration/kube/errors/resource-operation-errors.js';
+import {StatusCodes} from 'http-status-codes';
 
 interface DeploymentAddClusterConfig {
   quiet: boolean;
@@ -868,14 +869,18 @@ export class DeploymentCommand extends BaseCommand {
 
         task.title += `: ${clusterRef}, context: ${context}`;
 
-        const isConnected: boolean = await this.k8Factory
-          .getK8(context)
-          .namespaces()
-          .list()
-          .then((): boolean => true)
-          .catch((): boolean => false);
-
-        if (!isConnected) {
+        try {
+          await this.k8Factory.getK8(context).namespaces().list();
+        } catch (error: any) {
+          // 403 (FORBIDDEN) means we connected but lack namespace-list RBAC —
+          // that's fine, the connection itself is valid.
+          if (
+            error?.statusCode === StatusCodes.FORBIDDEN ||
+            error?.meta?.statusCode === StatusCodes.FORBIDDEN ||
+            error?.code === StatusCodes.FORBIDDEN
+          ) {
+            return;
+          }
           throw new SoloError(`Connection failed for cluster ${clusterRef} with context: ${context}`);
         }
       },
