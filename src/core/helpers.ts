@@ -834,62 +834,89 @@ export async function createAndCopyBlockNodeJsonFileForConsensusNode(
 
   const k8: K8 = k8Factory.getK8(context);
 
-  const container: Container = await new K8Helper(context).getConsensusNodeRootContainer(namespace, nodeAlias);
+  // In one-shot recovery, the consensus node pod may be in Failed phase.
+  // Don't delete the pod (that would lose JARs) — just skip exec operations
+  // and write the ConfigMap directly.
+  let container: Container | null = null;
+  try {
+    container = await new K8Helper(context).getConsensusNodeRootContainer(namespace, nodeAlias);
+  } catch {
+    logger.warn('Consensus node pod not found; writing block-nodes config via ConfigMap only.');
+  }
 
-  await container.execContainer('pwd');
-
-  const targetDirectory: string = `${constants.HEDERA_HAPI_PATH}/data/config`;
-
-  await container.execContainer(`mkdir -p ${targetDirectory}`);
-
-  // Copy the file and rename it to block-nodes.json in the destination
-  await container.copyTo(blockNodesJsonPath, targetDirectory);
-
-  // If using node-specific files, rename the copied file to the standard name
-  const sourceFilename: string = path.basename(blockNodesJsonPath);
-  await container.execContainer(
-    `mv ${targetDirectory}/${sourceFilename} ${targetDirectory}/${constants.BLOCK_NODES_JSON_FILE}`,
-  );
-
-  const applicationPropertiesFilePath: string = `${constants.HEDERA_HAPI_PATH}/data/config/${constants.APPLICATION_PROPERTIES}`;
-
-  const applicationPropertiesData: string = await container.execContainer(`cat ${applicationPropertiesFilePath}`);
-
-  const lines: string[] = applicationPropertiesData.split('\n');
-
-  // Remove line to enable overriding below.
-  for (const line of lines) {
-    if (line === 'blockStream.streamMode=RECORDS') {
-      lines.splice(lines.indexOf(line), 1);
+  if (container) {
+    try {
+      await container.execContainer('pwd');
+    } catch {
+      logger.warn(
+        'Consensus node pod is in a terminal state (e.g. Failed); writing block-nodes config via ConfigMap only.',
+      );
+      container = null;
     }
   }
 
-  // Switch to block streaming.
+  if (container) {
+    const targetDirectory: string = `${constants.HEDERA_HAPI_PATH}/data/config`;
 
-  if (!lines.some((line): boolean => line.startsWith('blockStream.streamMode='))) {
-    lines.push(`blockStream.streamMode=${constants.BLOCK_STREAM_STREAM_MODE}`);
+    await container.execContainer(`mkdir -p ${targetDirectory}`);
+
+    // Copy the file and rename it to block-nodes.json in the destination
+    await container.copyTo(blockNodesJsonPath, targetDirectory);
+
+    // If using node-specific files, rename the copied file to the standard name
+    const sourceFilename: string = path.basename(blockNodesJsonPath);
+    await container.execContainer(
+      `mv ${targetDirectory}/${sourceFilename} ${targetDirectory}/${constants.BLOCK_NODES_JSON_FILE}`,
+    );
+
+    const applicationPropertiesFilePath: string = `${constants.HEDERA_HAPI_PATH}/data/config/${constants.APPLICATION_PROPERTIES}`;
+
+    const applicationPropertiesData: string = await container.execContainer(`cat ${applicationPropertiesFilePath}`);
+
+    const lines: string[] = applicationPropertiesData.split('\n');
+
+    // Remove line to enable overriding below.
+    for (const line of lines) {
+      if (line === 'blockStream.streamMode=RECORDS') {
+        lines.splice(lines.indexOf(line), 1);
+      }
+    }
+
+    // Switch to block streaming.
+    if (!lines.some((line): boolean => line.startsWith('blockStream.streamMode='))) {
+      lines.push(`blockStream.streamMode=${constants.BLOCK_STREAM_STREAM_MODE}`);
+    }
+    if (!lines.some((line): boolean => line.startsWith('blockStream.writerMode='))) {
+      lines.push(`blockStream.writerMode=${constants.BLOCK_STREAM_WRITER_MODE}`);
+    }
+
+    // Update the shared ConfigMap with application.properties changes.
+    // This ConfigMap is owned by the Helm-managed solo-deployment chart template,
+    // so never add/modify Helm ownership metadata here.
+    try {
+      await k8.configMaps().update(namespace, 'network-node-data-config-cm', {
+        [constants.APPLICATION_PROPERTIES]: lines.join('\n'),
+      });
+    } catch {
+      // ConfigMap may have been temporarily deleted by a concurrent helm
+      // uninstall (recovery path).  Create it with Helm labels so the next
+      // helm upgrade can adopt it.
+      await k8.configMaps().create(namespace, 'network-node-data-config-cm', {'app.kubernetes.io/managed-by': 'Helm'}, {
+        [constants.APPLICATION_PROPERTIES]: lines.join('\n'),
+      });
+    }
+
+    // Write updated application.properties back to container
+    const updatedApplicationPropertiesFilePath: string = PathEx.join(
+      constants.SOLO_CACHE_DIR,
+      constants.APPLICATION_PROPERTIES,
+    );
+    fs.writeFileSync(updatedApplicationPropertiesFilePath, lines.join('\n'));
+    await container.copyTo(updatedApplicationPropertiesFilePath, targetDirectory);
   }
 
-  if (!lines.some((line): boolean => line.startsWith('blockStream.writerMode='))) {
-    lines.push(`blockStream.writerMode=${constants.BLOCK_STREAM_WRITER_MODE}`);
-  }
-
-  // Update the shared ConfigMap with application.properties changes.
-  // This ConfigMap is owned by the Helm-managed solo-deployment chart template,
-  // so never add/modify Helm ownership metadata here.
-  try {
-    await k8.configMaps().update(namespace, 'network-node-data-config-cm', {
-      [constants.APPLICATION_PROPERTIES]: lines.join('\n'),
-    });
-  } catch {
-    // ConfigMap may have been temporarily deleted by a concurrent helm
-    // uninstall (recovery path).  Create it and let the next helm upgrade
-    // adopt it with proper ownership metadata.
-    await k8.configMaps().create(namespace, 'network-node-data-config-cm', {}, {
-      [constants.APPLICATION_PROPERTIES]: lines.join('\n'),
-    });
-  }
-
+  // Always write the block-nodes ConfigMap so the helm chart can mount it,
+  // even when the pod hasn't been created yet or is in a terminal state.
   const configName: string = `network-${nodeAlias}-data-config-cm`;
   const helmLabels: Record<string, string> = {'app.kubernetes.io/managed-by': 'Helm'};
   const configMapExists: boolean = await k8.configMaps().exists(namespace, configName);
@@ -910,12 +937,4 @@ export async function createAndCopyBlockNodeJsonFileForConsensusNode(
   }
 
   logger.debug(`Copied block-nodes configuration to consensus node ${consensusNode.name}`);
-
-  const updatedApplicationPropertiesFilePath: string = PathEx.join(
-    constants.SOLO_CACHE_DIR,
-    constants.APPLICATION_PROPERTIES,
-  );
-
-  fs.writeFileSync(updatedApplicationPropertiesFilePath, lines.join('\n'));
-  await container.copyTo(updatedApplicationPropertiesFilePath, targetDirectory);
 }

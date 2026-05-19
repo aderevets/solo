@@ -164,6 +164,21 @@ export class PlatformInstaller {
       const container: Container = k8Containers.readByRef(containerReference);
 
       await container.execContainer('sync'); // ensure all writes are flushed before executing the script
+
+      // Verify the zip file was uploaded successfully — during recovery the pod
+      // may have been recreated between the copy and this exec, losing the file.
+      const zipBasename: string = path.basename(zipPath);
+      const zipInContainer: string = `${constants.HEDERA_USER_HOME_DIR}/${zipBasename}`;
+      const zipExistsOutput: string = await container.execContainer([
+        'bash',
+        '-c',
+        `test -f "${zipInContainer}" && echo "yes" || echo "no"`,
+      ]);
+      if (zipExistsOutput.trim() !== 'yes') {
+        this.logger.warn(`Zip file '${zipInContainer}' not found after upload; pod may have been recreated. Re-uploading...`);
+        await this.copyFiles(podReference, [zipPath, checksumPath], constants.HEDERA_USER_HOME_DIR, undefined, context);
+      }
+
       await container.execContainer(`chmod +x ${extractScript}`);
       await container.execContainer(`chown root:root ${extractScript}`);
       await container.execContainer([extractScript, tag]);
