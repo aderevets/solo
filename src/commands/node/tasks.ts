@@ -4155,7 +4155,14 @@ export class NodeCommandTasks {
         let txResp: TransactionResponse;
         let nodeCreateReceipt: TransactionReceipt;
         try {
-          signedTransaction = await nodeCreateTransaction.sign(context_.adminKey);
+          const accountKeys: AccountIdWithKeyPairObject = await this.accountManager.getAccountKeysFromSecret(
+            context_.newNode.accountId,
+            config.namespace,
+          );
+
+          // v0.75+ requires accountId signature when the account already exists.
+          signedTransaction = await nodeCreateTransaction.sign(PrivateKey.fromString(accountKeys.privateKey));
+          signedTransaction = await signedTransaction.sign(context_.adminKey);
           txResp = await signedTransaction.execute(config.nodeClient);
           nodeCreateReceipt = await txResp.getReceipt(config.nodeClient);
         } catch (error) {
