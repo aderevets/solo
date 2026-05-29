@@ -13,6 +13,10 @@ plugins:
 # This keeps proof verification enabled while avoiding BAD_BLOCK_PROOF startup loops.
 blockNode:
   config:
-    roster.bootstrap.rsa.mirrorNodeBaseUrl: "http://mirror-1-rest"
-    roster.bootstrap.rsa.initialQueryIntervalMillis: "5000"
-    roster.bootstrap.rsa.subsequentQueryIntervalMillis: "60000"
+    # Use env-style keys; dotted keys are not reliable via envFrom ConfigMap.
+    ROSTER_BOOTSTRAP_RSA_MIRROR_NODE_BASE_URL: "http://mirror-1-rest"
+    ROSTER_BOOTSTRAP_RSA_MIRRORNODEBASEURL: "http://mirror-1-rest"
+    ROSTER_BOOTSTRAP_RSA_INITIAL_QUERY_INTERVAL_MILLIS: "5000"
+    ROSTER_BOOTSTRAP_RSA_INITIALQUERYINTERVALMILLIS: "5000"
+    ROSTER_BOOTSTRAP_RSA_SUBSEQUENT_QUERY_INTERVAL_MILLIS: "60000"
+    ROSTER_BOOTSTRAP_RSA_SUBSEQUENTQUERYINTERVALMILLIS: "60000"
