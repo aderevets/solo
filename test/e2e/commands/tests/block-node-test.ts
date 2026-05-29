@@ -212,29 +212,44 @@ export class BlockNodeTest extends BaseCommandTest {
       const pod: Pod = await new K8Helper(contexts[0]).getBlockNodePod(namespace, blockNodeId);
 
       const srv: number = await pod.portForward(constants.BLOCK_NODE_PORT, constants.BLOCK_NODE_PORT);
+      try {
+        // Sleep to allow the port-forward to be established before attempting to connect
+        await sleep(Duration.ofSeconds(5));
 
-      // Sleep to allow the port-forward to be established before attempting to connect
-      await sleep(Duration.ofSeconds(5));
+        const commandOptions: ExecOptionsWithStringEncoding = {
+          cwd: './test/data',
+          maxBuffer: 50 * 1024 * 1024,
+          encoding: 'utf8',
+        };
 
-      const commandOptions: ExecOptionsWithStringEncoding = {
-        cwd: './test/data',
-        maxBuffer: 50 * 1024 * 1024,
-        encoding: 'utf8',
-      };
+        // Make script executable (no-op on Windows; chmod is not available)
+        if (!OperatingSystem.isWin32()) {
+          await execAsync('chmod +x ./get-block.sh', commandOptions);
+        }
 
-      // Make script executable (no-op on Windows; chmod is not available)
-      if (!OperatingSystem.isWin32()) {
-        await execAsync('chmod +x ./get-block.sh', commandOptions);
+        // Execute script (use bash explicitly on Windows since .sh files have no default handler)
+        const scriptCommand: string = OperatingSystem.isWin32() ? 'bash ./get-block.sh 1' : './get-block.sh 1';
+
+        let lastOutput: {stdout: string; stderr: string} = {stdout: '', stderr: ''};
+        const maxAttempts: number = 12;
+        for (let attempt: number = 1; attempt <= maxAttempts; attempt++) {
+          lastOutput = await execAsync(scriptCommand, commandOptions);
+          if (lastOutput.stderr !== '') {
+            break;
+          }
+          if (lastOutput.stdout.includes('"status": "SUCCESS"')) {
+            break;
+          }
+          if (attempt < maxAttempts) {
+            await sleep(Duration.ofSeconds(5));
+          }
+        }
+
+        expect(lastOutput.stderr).to.equal('');
+        expect(lastOutput.stdout).to.include('"status": "SUCCESS"');
+      } finally {
+        await pod.stopPortForward(srv);
       }
-
-      // Execute script (use bash explicitly on Windows since .sh files have no default handler)
-      const scriptCommand: string = OperatingSystem.isWin32() ? 'bash ./get-block.sh 1' : './get-block.sh 1';
-      const scriptStd: {stdout: string; stderr: string} = await execAsync(scriptCommand, commandOptions);
-
-      expect(scriptStd.stderr).to.equal('');
-      expect(scriptStd.stdout).to.include('"status": "SUCCESS"');
-
-      await pod.stopPortForward(srv);
     }).timeout(Duration.ofMinutes(2).toMillis());
   }
 
