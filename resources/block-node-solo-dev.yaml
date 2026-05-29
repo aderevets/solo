@@ -7,3 +7,12 @@ image:
 # solo-dev has all the plugins included in the image
 plugins:
   names:
+
+# In solo dev/e2e environments there is no pre-seeded RSA roster bootstrap file.
+# Configure RSA roster bootstrap to poll the in-cluster Mirror REST service.
+# This keeps proof verification enabled while avoiding BAD_BLOCK_PROOF startup loops.
+blockNode:
+  config:
+    roster.bootstrap.rsa.mirrorNodeBaseUrl: "http://mirror-1-rest"
+    roster.bootstrap.rsa.initialQueryIntervalMillis: "5000"
+    roster.bootstrap.rsa.subsequentQueryIntervalMillis: "60000"
