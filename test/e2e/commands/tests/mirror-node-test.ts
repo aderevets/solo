@@ -311,9 +311,10 @@ export class MirrorNodeTest extends BaseCommandTest {
       valuesFile,
     } = options;
     const {soloMirrorNodeDeployArgv, verifyMirrorNodeDeployWasSuccessful, verifyPingerStatus} = MirrorNodeTest;
+    const targetClusterReference: string = clusterReferenceNameArray[1] || clusterReferenceNameArray[0];
 
     it(`${testName}: mirror node add`, async (): Promise<void> => {
-      await main(soloMirrorNodeDeployArgv(testName, deployment, clusterReferenceNameArray[1], pinger, valuesFile));
+      await main(soloMirrorNodeDeployArgv(testName, deployment, targetClusterReference, pinger, valuesFile));
       await verifyMirrorNodeDeployWasSuccessful(
         contexts,
         namespace,

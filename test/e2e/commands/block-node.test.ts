@@ -19,6 +19,7 @@ import {DeploymentTest} from './tests/deployment-test.js';
 import {ConsensusNodeTest} from './tests/consensus-node-test.js';
 import {NetworkTest} from './tests/network-test.js';
 import {BlockNodeTest} from './tests/block-node-test.js';
+import {MirrorNodeTest} from './tests/mirror-node-test.js';
 import {sleep} from '../../../src/core/helpers.js';
 import {type EndToEndTestSuite} from '../end-to-end-test-suite.js';
 
@@ -84,6 +85,7 @@ const endToEndTestSuite: EndToEndTestSuite = new EndToEndTestSuiteBuilder()
         NetworkTest.deploy(options);
         ConsensusNodeTest.setup(options);
         ConsensusNodeTest.start(options);
+        MirrorNodeTest.add(options);
 
         BlockNodeTest.testBlockNode(options, 1);
 

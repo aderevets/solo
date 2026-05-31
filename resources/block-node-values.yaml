@@ -6,6 +6,15 @@ resources:
     cpu: "2"
     memory: "160Mi"
 
+# Use solo-dev image by default so block-node bootstrap plugins are available
+# without Maven resolution.
+image:
+  repository: ghcr.io/hiero-ledger/hiero-block-node-solo-dev
+
+# Disable chart-time plugin resolution and use plugins bundled in the image.
+plugins:
+  names:
+
 blockNode:
   # NOTE: for Block Node logging, see this link:
   #  https://github.com/hiero-ledger/hiero-block-node/blob/v0.11.0/charts/block-node-server/values.yaml#L141-L168
@@ -26,6 +35,16 @@ blockNode:
     MESSAGING_BLOCK_NOTIFICATION_QUEUE_SIZE: "16"
     BACKFILL_FETCH_BATCH_SIZE: "5"
     BACKFILL_BLOCK_NODE_SOURCES_PATH: "/opt/hiero/block-node/backfill/block-node-sources.json"
+    # In solo dev/e2e environments there is no pre-seeded RSA roster bootstrap file.
+    # Configure RSA roster bootstrap to poll the in-cluster Mirror REST service.
+    # This keeps proof verification enabled while avoiding BAD_BLOCK_PROOF startup loops.
+    # Use env-style keys; dotted keys are not reliable via envFrom ConfigMap.
+    ROSTER_BOOTSTRAP_RSA_MIRROR_NODE_BASE_URL: "http://mirror-1-restjava"
+    ROSTER_BOOTSTRAP_RSA_MIRRORNODEBASEURL: "http://mirror-1-restjava"
+    ROSTER_BOOTSTRAP_RSA_INITIAL_QUERY_INTERVAL_MILLIS: "5000"
+    ROSTER_BOOTSTRAP_RSA_INITIALQUERYINTERVALMILLIS: "5000"
+    ROSTER_BOOTSTRAP_RSA_SUBSEQUENT_QUERY_INTERVAL_MILLIS: "60000"
+    ROSTER_BOOTSTRAP_RSA_SUBSEQUENTQUERYINTERVALMILLIS: "60000"
   persistence:
     archive:
       size: 1Gi
