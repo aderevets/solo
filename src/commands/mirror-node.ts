@@ -364,6 +364,13 @@ export class MirrorNodeCommand extends BaseCommand {
       return '';
     }
 
+    if (!config.forceBlockNodeIntegration && constants.DISABLE_IMPORTER_SPRING_PROFILES) {
+      this.logger.info(
+        'Mirror node will remain configured to pull from consensus node because DISABLE_IMPORTER_SPRING_PROFILES=true',
+      );
+      return '';
+    }
+
     const clusterSchemas: ReadonlyArray<Readonly<ClusterSchema>> = configuration.clusters;
 
     this.logger.debug('Preparing mirror node values args overrides for block nodes integration');
@@ -396,14 +403,12 @@ export class MirrorNodeCommand extends BaseCommand {
 
     const data: {SPRING_PROFILES_ACTIVE?: string} & Record<string, string | number> = {};
 
-    if (config.forceBlockNodeIntegration || !constants.DISABLE_IMPORTER_SPRING_PROFILES) {
-      if (config.forceBlockNodeIntegration && constants.DISABLE_IMPORTER_SPRING_PROFILES) {
-        this.logger.showUser(
-          'DISABLE_IMPORTER_SPRING_PROFILES=true is set, but --force-block-node-integration overrides it; injecting SPRING_PROFILES_ACTIVE for block node integration',
-        );
-      }
-      data.SPRING_PROFILES_ACTIVE = constants.SPRING_PROFILES_ACTIVE;
+    if (constants.DISABLE_IMPORTER_SPRING_PROFILES) {
+      this.logger.showUser(
+        'DISABLE_IMPORTER_SPRING_PROFILES=true is set, but --force-block-node-integration overrides it; injecting SPRING_PROFILES_ACTIVE for block node integration',
+      );
     }
+    data.SPRING_PROFILES_ACTIVE = constants.SPRING_PROFILES_ACTIVE;
 
     for (const [index, node] of blockNodeFqdnList.entries()) {
       data[`HIERO_MIRROR_IMPORTER_BLOCK_NODES_${index}_HOST`] = node.host;
