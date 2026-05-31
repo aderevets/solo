@@ -189,8 +189,11 @@ export class MirrorNodeTest extends BaseCommandTest {
         const accountQueryUrl: string = `http://localhost:${portForwarder}/api/v1/accounts/${accountId}`;
 
         received = false;
+        let attempts: number = 0;
+        const maxAttempts: number = 120;
         // wait until the transaction reached consensus and retrievable from the mirror node API
-        while (!received) {
+        while (!received && attempts < maxAttempts) {
+          attempts += 1;
           const request: http.ClientRequest = http.request(
             accountQueryUrl,
             {method: 'GET', timeout: 100, headers: {Connection: 'close'}},
@@ -198,18 +201,20 @@ export class MirrorNodeTest extends BaseCommandTest {
               response.setEncoding('utf8');
 
               response.on('data', (chunk): void => {
-                let object: {account: string};
+                let object: {account?: string};
                 try {
-                  object = JSON.parse(chunk) as {account: string};
+                  object = JSON.parse(chunk) as {account?: string};
                 } catch {
                   testLogger.warn(`Mirror node returned non-JSON response, will retry: ${chunk}`);
                   return;
                 }
 
-                expect(
-                  object.account,
-                  'expect the created account to exist in the mirror nodes copy of the accounts',
-                ).to.equal(accountId);
+                if (object.account !== accountId) {
+                  testLogger.debug(
+                    `Account ${accountId} not visible in mirror yet (attempt ${attempts}/${maxAttempts}), will retry`,
+                  );
+                  return;
+                }
 
                 received = true;
               });
@@ -223,6 +228,11 @@ export class MirrorNodeTest extends BaseCommandTest {
           request.end(); // make the request
           await sleep(Duration.ofSeconds(2));
         }
+
+        expect(
+          received,
+          `expected account ${accountId} to become visible in mirror within ${maxAttempts} attempts`,
+        ).to.equal(true);
 
         await sleep(Duration.ofSeconds(1));
       }
